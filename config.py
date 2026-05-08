@@ -6,12 +6,12 @@ API_HASH        = "ed6be4855f2b5a2974f2632d05ae4d2d"
 BOT_TOKEN       = "8654428900:AAEo9rIchnsjbxYzPuaWCa84Zk9_nc9MPtY"
 ADMIN_IDS       = [7055859698]
 TG_MAIN_ADMIN   = 7055859698   # only this admin can change channels / toggle publish
-TARGET_CHANNEL  = "@x_telegram_newss"
-TG_FOOTER      = "\n\n🇮🇷 +مثبت ایران\n@mosbateiran"
+TARGET_CHANNEL  = "@mosbateiranchannel"
+TG_FOOTER      = "\n\n🇮🇷 +مثبت ایران\n@mosbateiranchannel"
 
 # Bale
 BALE_BOT_TOKEN      = "944232679:wSNlQZtETWB64BvhG1k2O4aQKWrTSxS8Vbo"
-BALE_ADMIN_IDS      = [1932923897, 298868, 467450740, 1521176985, 979164226, 1726449723, 815216755]
+BALE_ADMIN_IDS      = [1932923897, 298868, 467450740, 1521176985, 979164226, 1726449723, 815216755, 569245532]
 BALE_MAIN_ADMIN     = 1932923897   # only this admin can change channels / toggle publish
 BALE_TARGET_CHANNEL = "@mosbateiran"
 BALE_FOOTER         = "\n\n🇮🇷 *+مثبت ایران*\n📄 [@mosbateiran](ble.ir/join/4kUtvRC9wD)"
