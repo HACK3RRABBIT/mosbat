@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mosbat · Sign in</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+<div class="login-card">
+  <div class="brand big">
+    <span class="logo">🐦</span>
+    <div><div class="brand-name">mosbat</div><div class="brand-sub">news relay control</div></div>
+  </div>
+  <p class="muted">Sign in to manage the relay.</p>
+  <form id="login-form">
+    <input type="password" id="pw" placeholder="Access password" autofocus>
+    <button type="submit">Sign in</button>
+  </form>
+  <div id="err" class="err"></div>
+</div>
+<script>
+  document.getElementById('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const r = await fetch('/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'password=' + encodeURIComponent(document.getElementById('pw').value)
+    });
+    if (r.ok) location.href = '/';
+    else document.getElementById('err').textContent = 'Incorrect password';
+  });
+</script>
+</body>
+</html>

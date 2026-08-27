@@ -24,6 +24,7 @@ from shared import (
     make_key, has_blockquote, extract_blockquote_and_rest,
     build_caption, build_quote_caption, get_doc_mime,
 )
+import ai_filter
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -37,6 +38,10 @@ log = logging.getLogger(__name__)
 
 userbot = TelegramClient("forwarder_user", API_ID, API_HASH)
 bot     = TelegramClient("forwarder_bot",  API_ID, API_HASH)
+
+# Boot timestamp — the intake watchdog uses this to ignore stale on-disk
+# telemetry from a previous run (so it can't think intake is frozen at boot).
+_BOT_STARTED_AT = _time.time()
 
 mode             = "manual"
 tg_publish       = True   # True = send to Telegram channel, False = skip
@@ -269,6 +274,36 @@ async def process_msgs(msgs, source_username=""):
     entry = await prepare_entry(msgs, source_username=source_username)
     if not entry:
         return
+
+    # ── Caption-less media gate ──────────────
+    # Photos, photo/video albums, standalone videos and documents with NO real
+    # caption are dropped before queueing (the user wants only captioned media
+    # relayed). Pure syntactic check — no LLM call.
+    mtype = entry.get("type", "text")
+    judge_text = entry.get("raw_text") or entry.get("caption") or ""
+    dropped, reason = ai_filter.media_gate_check(mtype, judge_text)
+    if dropped:
+        log.info("Media gate dropped %s from %s (no caption)", mtype, source_username)
+        for f in entry.get("files", []):
+            f["data"] = b""
+        gc.collect()
+        return
+
+    # ── AI news gate ──────────────────────────
+    # Drop useless news / dedupe before anything is queued (the queue feeds
+    # BOTH the Telegram approval flow and the Bale bot, so this is the only
+    # place we need to interpose). Media-only posts with a caption reach here
+    # and are judged on that caption's text.
+    if ai_filter.is_enabled() and judge_text.strip():
+        decision = await ai_filter.decide(judge_text, source_username)
+        if not decision["relay"]:
+            log.info("AI filter dropped %s: %s — %s",
+                     decision["dropped"], source_username, decision["reason"])
+            # free media bytes, do not queue
+            for f in entry.get("files", []):
+                f["data"] = b""
+            gc.collect()
+            return
 
     write_to_queue(entry)  # always write — Bale bot reads this regardless of tg_active
 
@@ -556,6 +591,7 @@ async def on_new_message(event):
     if has_link(msg.message or ""):
         log.info("Skipped message id=%s (link)", msg.id)
         return
+    ai_filter.mark_received()  # telemetry: intake loop is alive
     chat = await event.get_chat()
     src  = f"@{chat.username}" if getattr(chat, "username", None) else ""
 
@@ -597,6 +633,38 @@ async def on_edited_message(event):
             log.error("Failed to edit: %s", e)
 
 
+# ── Intake watchdog ─────────────────────────
+# If Telegram updates stop arriving for a while while the userbot still claims
+# to be connected, the connection is wedged (seen: a stalled HTTP call blocked
+# the event loop, leaving a CLOSE-WAIT socket and no news). Force a reconnect so
+# intake resumes without waiting for Telethon's own (slow/quiet) reconnect.
+
+async def intake_watchdog(stale_after: int = 120, check_every: int = 30):
+    """Restart the bot if Telegram updates stop arriving (intake frozen) while
+    the userbot still thinks it's connected. Only acts on telemetry recorded
+    AFTER this boot — a stale on-disk timestamp from a previous run is ignored."""
+    await asyncio.sleep(20)  # grace period on startup
+    while True:
+        await asyncio.sleep(check_every)
+        try:
+            d = ai_filter.read_stats_file()
+        except Exception:
+            d = {}
+        last = d.get("last_received", 0) or 0
+        # Ignore telemetry that predates this boot (stale file from a test/old run).
+        if last < _BOT_STARTED_AT:
+            ai_filter.mark_received()
+            continue
+        if _BOT_STARTED_AT and (time.time() - _BOT_STARTED_AT) < stale_after:
+            continue  # haven't been up long enough to expect a verdict yet
+        if (time.time() - last) >= stale_after and userbot.is_connected():
+            log.warning("Intake stale %.0fs — restarting telegram_bot "
+                        "(supervisor will respawn a fresh connection)",
+                        time.time() - last)
+            import os as _os
+            _os._exit(1)
+
+
 # ── Periodic cleanup ─────────────────────────
 
 async def cleanup_task():
@@ -628,6 +696,7 @@ async def cleanup_task():
 async def main():
     load_channels()
     load_state()
+    ai_filter.mark_received()  # telemetry: this boot is the baseline, not stale disk data
     await userbot.start()
     log.info("Userbot logged in.")
     await bot.start(bot_token=BOT_TOKEN)
@@ -636,6 +705,7 @@ async def main():
         userbot.run_until_disconnected(),
         bot.run_until_disconnected(),
         cleanup_task(),
+        intake_watchdog(),
     )
 
 if __name__ == "__main__":

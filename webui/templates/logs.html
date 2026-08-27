@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Logs{% endblock %}
+{% set active = 'logs' %}
+{% block crumb %}Logs{% endblock %}
+{% block h1 %}Live logs{% endblock %}
+
+{% block topbar_right %}
+  <label class="follow"><input type="checkbox" id="follow" checked> follow</label>
+  <button class="btn small" onclick="scrollBottom()">↓ bottom</button>
+{% endblock %}
+
+{% block content %}
+<div class="log-tabs">
+  <a href="/logs?which=telegram" class="{% if which=='telegram' %}on{% endif %}">telegram_bot</a>
+  <a href="/logs?which=bale" class="{% if which=='bale' %}on{% endif %}">bale_bot</a>
+</div>
+<pre id="term" class="terminal"></pre>
+{% endblock %}
+
+{% block script %}
+<script>
+const which = new URLSearchParams(location.search).get('which') || 'telegram';
+let term = document.getElementById('term');
+function scrollBottom(){ term.scrollTop = term.scrollHeight; }
+
+async function stream() {
+  const r = await fetch('/api/logs/tail?which=' + which, {cache: 'no-store'});
+  if (!r.ok) { location.href = '/login'; return; }
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  for (;;) {
+    const {value, done} = await reader.read();
+    if (done) break;
+    const atBottom = term.scrollTop + term.clientHeight >= term.scrollHeight - 40;
+    term.textContent += dec.decode(value);
+    const lines = term.textContent.split('\n');
+    if (lines.length > 2000) term.textContent = lines.slice(-2000).join('\n');
+    if (document.getElementById('follow').checked && atBottom) scrollBottom();
+  }
+}
+stream();
+
+// also reflect side nav state
+async function navState(){
+  try{
+    const d = await fetch('/api/status').then(r=>r.ok?r.json():null);
+    if(!d) return;
+    const dot=document.getElementById('nav-dot'), lbl=document.getElementById('nav-state');
+    dot.className='dot '+(d.master_running?'ok':'bad');
+    lbl.textContent=d.master_running?'Supervisor online':'Supervisor off';
+  }catch(e){}
+}
+navState(); setInterval(navState,4000);
+</script>
+{% endblock %}

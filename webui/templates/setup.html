@@ -1,0 +1,279 @@
+{% extends "base.html" %}
+{% block title %}Setup{% endblock %}
+{% set active = 'setup' %}
+{% block crumb %}Setup{% endblock %}
+{% block h1 %}Setup &amp; Telegram login{% endblock %}
+
+{% block content %}
+<div class="setup-grid">
+
+  <!-- LEFT: stepper -->
+  <section class="panel">
+    <div class="panel-head"><h2>Go-live steps</h2></div>
+    <ol class="stepper" id="stepper">
+      <li data-step="creds">
+        <span class="step-ic">①</span>
+        <div><div class="step-t">API credentials</div>
+        <div class="step-d" id="creds-d">config.py API_ID / API_HASH present</div></div>
+      </li>
+      <li data-step="login">
+        <span class="step-ic">②</span>
+        <div><div class="step-t">Telegram login</div>
+        <div class="step-d" id="login-d">create forwarder_user session</div></div>
+      </li>
+      <li data-step="baledl">
+        <span class="step-ic">③</span>
+        <div><div class="step-t">Bale downloader session</div>
+        <div class="step-d" id="baledl-d">forwarder_bale_dl.session</div></div>
+      </li>
+      <li data-step="live">
+        <span class="step-ic">④</span>
+        <div><div class="step-t">Bots live</div>
+        <div class="step-d" id="live-d">both bots running</div></div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- RIGHT: actions -->
+  <div class="setup-right">
+
+    <!-- Login console -->
+    <section class="panel" id="login-panel">
+      <div class="panel-head"><h2>Telegram login</h2>
+        <button class="btn small warn" id="reset-btn" onclick="resetLogin()">Reset</button>
+      </div>
+
+      <div id="login-form-area">
+        <p class="muted" id="login-intro">
+          Log in with the Telegram account the bots will use to read source
+          channels. A code is sent to your Telegram app.
+        </p>
+
+        <div class="field" id="phone-field">
+          <label>Phone (international, e.g. +98912...)</label>
+          <div class="inline">
+            <input id="phone" placeholder="+98...">
+            <button class="btn ok" id="send-btn" onclick="sendPhone()">Send code</button>
+          </div>
+        </div>
+
+        <div class="field hidden" id="code-field">
+          <label>Login code from Telegram</label>
+          <div class="inline">
+            <input id="code" placeholder="12345">
+            <button class="btn ok" onclick="sendCode()">Verify</button>
+          </div>
+        </div>
+
+        <div class="field hidden" id="pass-field">
+          <label>Two-step verification password</label>
+          <div class="inline">
+            <input id="tpass" type="password" placeholder="account password">
+            <button class="btn ok" onclick="sendPass()">Unlock</button>
+          </div>
+        </div>
+
+        <div class="done-box hidden" id="done-box">
+          ✅ Logged in. Session <code>forwarder_user.session</code> created.
+        </div>
+
+        <div class="err-box hidden" id="login-err"></div>
+      </div>
+    </section>
+
+    <!-- Config editor -->
+    <section class="panel">
+      <div class="panel-head"><h2>Source channels</h2></div>
+      <p class="muted">One @channel per line. Saved to config.py → SOURCE_CHANNELS.</p>
+      <textarea id="channels" class="channels" rows="8">{% for c in cfg.SOURCE_CHANNELS %}{{ c }}
+{% endfor %}</textarea>
+      <button class="btn" onclick="saveChannels()">Save channels</button>
+      <span class="hint" id="chan-hint"></span>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Tokens &amp; targets</h2></div>
+      <div class="kv-edit">
+        <div><label>Telegram BOT_TOKEN</label><input id="f_BOT_TOKEN" value="{{ cfg.BOT_TOKEN or '' }}"></div>
+        <div><label>TARGET_CHANNEL (TG)</label><input id="f_TARGET_CHANNEL" value="{{ cfg.TARGET_CHANNEL or '' }}"></div>
+        <div><label>BALE_BOT_TOKEN</label><input id="f_BALE_BOT_TOKEN" value="{{ cfg.BALE_BOT_TOKEN or '' }}"></div>
+        <div><label>BALE_TARGET_CHANNEL</label><input id="f_BALE_TARGET_CHANNEL" value="{{ cfg.BALE_TARGET_CHANNEL or '' }}"></div>
+      </div>
+      <button class="btn" onclick="saveFields()">Save tokens</button>
+      <span class="hint" id="tok-hint"></span>
+    </section>
+
+    <!-- Create bale session -->
+    <section class="panel">
+      <div class="panel-head"><h2>Bale downloader session</h2></div>
+      <p class="muted">
+        bale_bot needs <code>forwarder_bale_dl.session</code>. After Telegram
+        login, generate it from the same account — no extra code required.
+      </p>
+      <button class="btn ok" id="makebale-btn" onclick="makeBale()">Create forwarder_bale_dl.session</button>
+      <span class="hint" id="bale-hint"></span>
+    </section>
+
+    <!-- AI news filter -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>AI news filter</h2>
+        <label class="switch">
+          <input type="checkbox" id="ai-toggle" onchange="toggleAI()">
+          <span id="ai-toggle-label">off</span>
+        </label>
+      </div>
+      <p class="muted">An LLM gate drops useless news (ads, "follow us" promos)
+        and de-duplicates repeats before they reach Telegram or Bale.</p>
+      <p class="muted" style="margin-top:6px">
+        <label class="switch" style="cursor:default">
+          <input type="checkbox" id="media-toggle" onchange="toggleMedia()">
+          <span id="media-toggle-label">off</span>
+        </label>
+        &nbsp;Drop photos / videos / albums / files with no caption
+      </p>
+      <div class="kv-edit">
+        <div><label>Base URL</label><input id="ai_base" placeholder="http://…/v1"></div>
+        <div><label>Model</label><input id="ai_model" placeholder="UN/claude-opus-5"></div>
+        <div><label>API key</label><input id="ai_key" type="password" placeholder="sk-…"></div>
+        <div><label>Dedup window (sec)</label><input id="ai_ttl" placeholder="86400"></div>
+      </div>
+      <div class="actions-row">
+        <button class="btn" onclick="saveAI()">Save AI settings</button>
+        <button class="btn small warn" onclick="resetAIStats()">Reset stats</button>
+        <span class="hint" id="ai-hint"></span>
+      </div>
+      <div class="ai-mini" id="ai-mini"></div>
+    </section>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block script %}
+<script>
+function show(id, on){ document.getElementById(id).classList.toggle('hidden', !on); }
+function err(msg){ const e=document.getElementById('login-err'); if(msg){ e.textContent=msg; show('login-err', true);} else show('login-err', false); }
+
+async function refreshLogin(){
+  const d = await fetch('/api/login/status').then(r=>r.json());
+  // stepper states
+  markStep('creds', d.config.api_id ? 'done' : 'todo', d.config.api_id ? 'API credentials present' : 'missing in config.py');
+  markStep('login', d.done ? 'done' : (d.step==='idle'?'todo':'active'), d.done ? 'forwarder_user.session created' : (d.step!=='idle'?'in progress':'not started'));
+  markStep('baledl', d.config.bale_dl ? 'done' : 'todo', d.config.bale_dl ? 'forwarder_bale_dl.session present' : 'not created');
+  markStep('live', (d.config.tg_user && d.config.bale_dl) ? 'todo' : 'todo', 'start bots from Bots page when ready');
+
+  if (d.error) err(d.error);  // never auto-clear here; handlers clear on new attempt
+
+  if (d.done){ show('done-box', true); show('phone-field', false); show('code-field', false); show('pass-field', false); }
+  else if (d.step==='code'){ show('code-field', true); show('phone-field', false); }
+  else if (d.step==='password'){ show('pass-field', true); show('code-field', false); }
+  else { show('phone-field', true); }
+  return d;
+}
+
+function markStep(name, state, desc){
+  const li = document.querySelector(`li[data-step="${name}"]`);
+  if(!li) return;
+  li.className = 'step-' + state;
+  const d = document.getElementById(name+'-d');
+  if(d) d.textContent = desc;
+}
+
+async function sendPhone(){
+  const phone = document.getElementById('phone').value.trim();
+  if(!phone){ err('Enter a phone number'); return; }
+  err(null); show('login-intro', false);
+  const d = await fetch('/api/login/phone', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'phone='+encodeURIComponent(phone)}).then(r=>r.json());
+  if (d.error) { err(d.error); return; }   // show the attempt's error immediately
+  await refreshLogin();
+}
+async function sendCode(){
+  const code = document.getElementById('code').value.trim();
+  if(!code){ err('Enter the code'); return; }
+  const d = await fetch('/api/login/code', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'code='+encodeURIComponent(code)}).then(r=>r.json());
+  if (d.error) { err(d.error); return; }
+  await refreshLogin();
+}
+async function sendPass(){
+  const p = document.getElementById('tpass').value;
+  const d = await fetch('/api/login/password', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'password='+encodeURIComponent(p)}).then(r=>r.json());
+  if (d.error) { err(d.error); return; }
+  await refreshLogin();
+}
+async function resetLogin(){
+  await fetch('/api/login/reset', {method:'POST'});
+  show('done-box', false); show('login-intro', true);
+  await refreshLogin();
+}
+async function makeBale(){
+  const btn = document.getElementById('makebale-btn');
+  btn.disabled = true; btn.textContent = 'Creating…';
+  const d = await fetch('/api/login/makebale', {method:'POST'}).then(r=>r.json());
+  btn.disabled = false; btn.textContent = 'Create forwarder_bale_dl.session';
+  document.getElementById('bale-hint').textContent = d.ok ? '✅ created' : ('❌ ' + (d.error||'failed'));
+  await refreshLogin();
+}
+
+async function saveChannels(){
+  const txt = document.getElementById('channels').value;
+  const d = await fetch('/api/config/channels', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'channels='+encodeURIComponent(txt)}).then(r=>r.json());
+  document.getElementById('chan-hint').textContent = d.ok ? ('✅ '+d.channels.length+' channels saved') : ('❌ '+d.error);
+}
+
+async function refreshAI(){
+  const d = await fetch('/api/ai').then(r=>r.json());
+  const s = d.settings || {};
+  const ai = document.getElementById('ai-toggle');
+  ai.checked = !!s.enabled;
+  document.getElementById('ai-toggle-label').textContent = s.enabled ? 'active' : 'off';
+  const m = document.getElementById('media-toggle');
+  m.checked = !!s.media_gate;
+  document.getElementById('media-toggle-label').textContent = s.media_gate ? 'on' : 'off';
+  document.getElementById('ai_base').value = s.base_url || '';
+  document.getElementById('ai_model').value = s.model || '';
+  if (s.api_key_masked) document.getElementById('ai_key').placeholder = s.api_key_masked;
+  document.getElementById('ai_ttl').value = s.dedup_ttl_seconds || '';
+  const st = d.stats || {};
+  document.getElementById('ai-mini').textContent =
+    `checked ${st.checked||0} · relayed ${st.relayed||0} · useless ${st.dropped_useless||0} · dup ${st.dropped_dup||0} · no-caption ${st.dropped_media||0} · errors ${st.errors||0}`;
+}
+async function toggleAI(){
+  const on = document.getElementById('ai-toggle').checked;
+  const d = await fetch('/api/ai/toggle', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'enabled='+(on?'true':'false')}).then(r=>r.json());
+  document.getElementById('ai-toggle-label').textContent = d.enabled ? 'active' : 'off';
+}
+async function toggleMedia(){
+  const on = document.getElementById('media-toggle').checked;
+  const d = await fetch('/api/ai/media/toggle', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'enabled='+(on?'true':'false')}).then(r=>r.json());
+  document.getElementById('media-toggle-label').textContent = d.media_gate ? 'on' : 'off';
+}
+async function saveAI(){
+  const b = document.getElementById('ai_base').value;
+  const m = document.getElementById('ai_model').value;
+  const k = document.getElementById('ai_key').value;
+  const t = document.getElementById('ai_ttl').value;
+  const d = await fetch('/api/ai/save', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'base_url='+encodeURIComponent(b)+'&model='+encodeURIComponent(m)+'&api_key='+encodeURIComponent(k)+'&dedup_ttl_seconds='+encodeURIComponent(t)}).then(r=>r.json());
+  document.getElementById('ai-hint').textContent = d.ok ? '✅ saved (bots reload live)' : ('❌ '+d.error);
+  await refreshAI();
+}
+async function resetAIStats(){
+  await fetch('/api/ai/reset', {method:'POST'});
+  await refreshAI();
+}
+async function saveFields(){
+  const keys = ['BOT_TOKEN','TARGET_CHANNEL','BALE_BOT_TOKEN','BALE_TARGET_CHANNEL'];
+  for(const k of keys){
+    const v = document.getElementById('f_'+k).value;
+    await fetch('/api/config/field', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'key='+k+'&value='+encodeURIComponent(v)});
+  }
+  document.getElementById('tok-hint').textContent = '✅ saved (restart bots to apply)';
+}
+
+refreshLogin();
+setInterval(refreshLogin, 3000);
+refreshAI();
+setInterval(refreshAI, 4000);
+</script>
+{% endblock %}

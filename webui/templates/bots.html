@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Bots{% endblock %}
+{% set active = 'bots' %}
+{% block crumb %}Bots{% endblock %}
+{% block h1 %}Bot control{% endblock %}
+
+{% block topbar_right %}
+  <div class="master-pill">
+    Supervisor <span class="pill {{ 'ok' if master_running else 'bad' }}">{{ 'ONLINE' if master_running else 'OFFLINE' }}</span>
+  </div>
+{% endblock %}
+
+{% block content %}
+<div class="actions-row">
+  <button class="btn ok" onclick="ctrl('start','all')">Start all</button>
+  <button class="btn warn" onclick="ctrl('stop','all')">Stop all</button>
+  <button class="btn" onclick="ctrl('restart','all')">Restart all</button>
+  <span class="hint">Changes take effect in ~1s via the supervisor.</span>
+</div>
+
+<section class="bot-list">
+  {% for b in bots %}
+  <div class="bot-row" id="row-{{ b.name }}">
+    <div class="bot-row-main">
+      <span class="pill" id="pill-{{ b.name }}">…</span>
+      <div class="bot-id">
+        <div class="bot-name">{{ b.name }}.py</div>
+        <div class="bot-sub" id="sub-{{ b.name }}">
+          PID {{ b.pid or '—' }} · {{ 'running' if b.running else ('needs login' if b.needs_login else 'stopped') }}
+        </div>
+      </div>
+    </div>
+    {% if b.needs_login %}
+    <a class="btn warn" href="/setup">Needs login →</a>
+    {% else %}
+    <div class="bot-actions">
+      <button class="btn ok" onclick="ctrl('start','{{ b.name }}')">Start</button>
+      <button class="btn warn" onclick="ctrl('stop','{{ b.name }}')">Stop</button>
+      <button class="btn" onclick="ctrl('restart','{{ b.name }}')">Restart</button>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endblock %}
+
+{% block script %}
+<script>
+async function ctrl(action, target) {
+  await fetch('/api/control', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: `action=${action}&target=${target}`
+  });
+}
+async function poll() {
+  const r = await fetch('/api/status');
+  if (!r.ok) { location.href = '/login'; return; }
+  const d = await r.json();
+  for (const b of d.bots) {
+    const pill = document.getElementById('pill-' + b.name);
+    let label, cls;
+    if (b.needs_login) { label = 'NEEDS LOGIN'; cls = 'warn'; }
+    else if (b.running) { label = 'RUNNING'; cls = 'ok'; }
+    else { label = 'STOPPED'; cls = 'bad'; }
+    pill.textContent = label; pill.className = 'pill ' + cls;
+    const sub = document.getElementById('sub-' + b.name);
+    if (sub) sub.textContent = `PID ${b.pid || '—'} · ` + (b.needs_login ? 'needs login' : (b.running ? 'running' : 'stopped'));
+  }
+}
+poll(); setInterval(poll, 2500);
+</script>
+{% endblock %}

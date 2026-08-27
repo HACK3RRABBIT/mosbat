@@ -3,3 +3,12 @@
 *.log
 __pycache__/
 *.pyc
+.venv/
+venv/
+requirements.txt
+ai_settings.json
+ai_stats.json
+ai_dedup_store.jsonl
+webui/master_status.json
+webui/master_control.json
+webui/login_state.json

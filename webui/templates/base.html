@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}mosbat{% endblock %} · Control</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo">🐦</span>
+      <div>
+        <div class="brand-name">mosbat</div>
+        <div class="brand-sub">news relay control</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="/" class="{% if active=='home' %}on{% endif %}"><span class="ic">▦</span>Dashboard</a>
+      <a href="/bots" class="{% if active=='bots' %}on{% endif %}"><span class="ic">⚙</span>Bots</a>
+      <a href="/logs?which=telegram" class="{% if active=='logs' %}on{% endif %}"><span class="ic">≣</span>Logs</a>
+      <a href="/setup" class="{% if active=='setup' %}on{% endif %}"><span class="ic">✦</span>Setup</a>
+    </nav>
+    <div class="side-foot">
+      <div class="sys-state">
+        <span class="dot" id="nav-dot"></span>
+        <span id="nav-state">loading…</span>
+      </div>
+      <a href="#" id="logout" class="logout">Sign out</a>
+    </div>
+  </aside>
+
+  <main class="content">
+    <header class="topbar">
+      <div>
+        <div class="crumb">{% block crumb %}Dashboard{% endblock %}</div>
+        <h1>{% block h1 %}Dashboard{% endblock %}</h1>
+      </div>
+      {% block topbar_right %}{% endblock %}
+    </header>
+    <section class="page">{% block content %}{% endblock %}</section>
+  </main>
+</div>
+
+<script>
+  document.getElementById('logout')?.addEventListener('click', async (e) => {
+    e.preventDefault(); await fetch('/logout'); location.href = '/login';
+  });
+  // sidebar live master state
+  async function navState() {
+    try {
+      const d = await fetch('/api/status').then(r => r.ok ? r.json() : null);
+      if (!d) return;
+      const dot = document.getElementById('nav-dot');
+      const lbl = document.getElementById('nav-state');
+      const on = d.master_running;
+      dot.className = 'dot ' + (on ? 'ok' : 'bad');
+      lbl.textContent = on ? 'Supervisor online' : 'Supervisor off';
+    } catch (e) {}
+  }
+  navState(); setInterval(navState, 4000);
+</script>
+{% block script %}{% endblock %}
+</body>
+</html>

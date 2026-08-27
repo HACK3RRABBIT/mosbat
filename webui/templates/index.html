@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% set active = 'home' %}
+{% block crumb %}Dashboard{% endblock %}
+{% block h1 %}Dashboard{% endblock %}
+
+{% block topbar_right %}
+  <div class="master-pill">
+    Supervisor
+    <span class="pill {{ 'ok' if master_running else 'bad' }}" id="mstate">{{ 'ONLINE' if master_running else 'OFFLINE' }}</span>
+  </div>
+{% endblock %}
+
+{% block content %}
+<section class="metrics">
+  <div class="tile">
+    <div class="tile-label">CPU</div>
+    <div class="tile-val" id="cpu">{{ host.cpu_percent }}%</div>
+    <div class="bar"><i id="cpu-bar" style="width:{{ host.cpu_percent }}%"></i></div>
+  </div>
+  <div class="tile">
+    <div class="tile-label">Memory</div>
+    <div class="tile-val" id="mem">{{ host.mem_percent }}%</div>
+    <div class="tile-sub">{{ host.mem_used_mb }} / {{ host.mem_total_mb }} MB</div>
+    <div class="bar"><i id="mem-bar" style="width:{{ host.mem_percent }}%"></i></div>
+  </div>
+  <div class="tile">
+    <div class="tile-label">Disk /</div>
+    <div class="tile-val" id="disk">{{ host.disk_percent }}%</div>
+    <div class="bar"><i id="disk-bar" style="width:{{ host.disk_percent }}%"></i></div>
+  </div>
+  <div class="tile">
+    <div class="tile-label">Queue</div>
+    <div class="tile-val" id="q">{{ queue.pending_lines }}</div>
+    <div class="tile-sub">pending lines</div>
+  </div>
+  <div class="tile">
+    <div class="tile-label">Load avg</div>
+    <div class="tile-val sm" id="load">{{ host.load_avg[0] }} · {{ host.load_avg[1] }} · {{ host.load_avg[2] }}</div>
+  </div>
+  <div class="tile">
+    <div class="tile-label">Uptime</div>
+    <div class="tile-val sm" id="up">{{ host.boot_secs // 3600 }}h {{ (host.boot_secs % 3600)//60 }}m</div>
+    <div class="tile-sub">{{ host.hostname }}</div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Bots</h2>
+    <a class="link" href="/bots">Manage →</a>
+  </div>
+  <div class="bot-grid">
+    {% for b in bots %}
+    <div class="bot-card" id="bot-{{ b.name }}">
+      <div class="bot-top">
+        <span class="bot-name">{{ b.name }}.py</span>
+        <span class="pill" id="pill-{{ b.name }}">…</span>
+      </div>
+      <div class="bot-meta">
+        <span>PID <code id="pid-{{ b.name }}">{{ b.pid or '—' }}</code></span>
+        <span id="st-{{ b.name }}">{{ 'running' if b.running else ('needs login' if b.needs_login else 'stopped') }}</span>
+      </div>
+      <pre class="mini-log" id="log-{{ b.name }}">{{ b.last_log or '—' }}</pre>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>AI News Filter</h2>
+    <a class="link" href="/setup">Settings →</a>
+  </div>
+  <div class="ai-grid">
+    <div class="ai-state">
+      <span class="pill" id="ai-state">…</span>
+      <span class="ai-model" id="ai-model"></span>
+    </div>
+    <div class="ai-stats">
+      <div class="ai-stat"><b id="ai-checked">0</b><span>Checked</span></div>
+      <div class="ai-stat ok"><b id="ai-relayed">0</b><span>Relayed</span></div>
+      <div class="ai-stat warn"><b id="ai-useless">0</b><span>Useless</span></div>
+      <div class="ai-stat warn"><b id="ai-dup">0</b><span>Duplicate</span></div>
+      <div class="ai-stat warn"><b id="ai-media">0</b><span>No-caption</span></div>
+      <div class="ai-stat bad"><b id="ai-err">0</b><span>Errors</span></div>
+    </div>
+    <div class="ai-freshness" id="ai-freshness">last news: —</div>
+  </div>
+</section>
+{% endblock %}
+
+{% block script %}
+<script>
+async function refresh() {
+  const r = await fetch('/api/status');
+  if (!r.ok) { location.href = '/login'; return; }
+  const d = await r.json();
+  set('mstate', d.master_running ? 'ONLINE' : 'OFFLINE');
+  document.getElementById('mstate').className = 'pill ' + (d.master_running ? 'ok' : 'bad');
+  set('cpu', d.host.cpu_percent + '%'); bar('cpu-bar', d.host.cpu_percent);
+  set('mem', d.host.mem_percent + '%'); bar('mem-bar', d.host.mem_percent);
+  set('disk', d.host.disk_percent + '%'); bar('disk-bar', d.host.disk_percent);
+  set('q', d.queue.pending_lines);
+  set('load', d.host.load_avg.join(' · '));
+  set('up', Math.floor(d.host.boot_secs/3600) + 'h ' + Math.floor((d.host.boot_secs%3600)/60) + 'm');
+  for (const b of d.bots) {
+    set('pid-' + b.name, b.pid || '—');
+    const pill = document.getElementById('pill-' + b.name);
+    let label, cls;
+    if (b.needs_login) { label = 'NEEDS LOGIN'; cls = 'warn'; }
+    else if (b.running) { label = 'RUNNING'; cls = 'ok'; }
+    else { label = 'STOPPED'; cls = 'bad'; }
+    pill.textContent = label; pill.className = 'pill ' + cls;
+    set('st-' + b.name, b.needs_login ? 'needs login' : (b.running ? 'running' : 'stopped'));
+    const log = document.getElementById('log-' + b.name);
+    if (b.last_log) log.textContent = b.last_log;
+  }
+  if (d.ai) {
+    const on = d.ai.settings && d.ai.settings.enabled;
+    const sp = document.getElementById('ai-state');
+    sp.textContent = on ? 'ACTIVE' : 'OFF';
+    sp.className = 'pill ' + (on ? 'ok' : 'bad');
+    set('ai-model', d.ai.settings ? (d.ai.settings.model || '') : '');
+    const s = d.ai.stats || {};
+    set('ai-checked', s.checked || 0);
+    set('ai-relayed', s.relayed || 0);
+    set('ai-useless', s.dropped_useless || 0);
+    set('ai-dup', s.dropped_dup || 0);
+    set('ai-media', s.dropped_media || 0);
+    set('ai-err', s.errors || 0);
+    const fr = document.getElementById('ai-freshness');
+    const now = Math.floor(Date.now()/1000);
+    const recv = s.last_received || 0;
+    const rel = s.last_relayed || 0;
+    let txt = 'last news: ';
+    if (recv) {
+      const mins = Math.floor((now - recv)/60);
+      txt += (mins<=1 ? 'just now' : (mins + 'm ago'));
+      if (mins > 8) fr.className = 'ai-freshness stale';
+      else fr.className = 'ai-freshness';
+    } else {
+      txt += '—';
+      fr.className = 'ai-freshness';
+    }
+    fr.textContent = txt + (rel ? '  ·  last relayed ' + fmtAgo(now - rel) : '');
+  }
+}
+function fmtAgo(sec){ const m=Math.floor(sec/60); return m<=1?'just now':(m+'m ago'); }
+function set(id, v){ const e = document.getElementById(id); if (e) e.textContent = v; }
+function bar(id, v){ const e = document.getElementById(id); if (e) e.style.width = v + '%'; }
+refresh(); setInterval(refresh, 2500);
+</script>
+{% endblock %}

@@ -19,7 +19,6 @@ BALE_MAX_VIDEO_BYTES = 20 * 1024 * 1024  # 20 MB
 
 # Source channels
 SOURCE_CHANNELS = [
-    "@AjaNews",
     "@irna_1313",
     "@isna94",
     "@Tasnimnews",
@@ -30,18 +29,17 @@ SOURCE_CHANNELS = [
     "@bbcpersian",
     "@farhikhteganonline",
     "@akharinkhabar",
-    "@khabarfouri"
+    "@khabarfouri",
 ]
 
 PERSIAN_CHANNELS = {
     "@irna_1313", "@isna94", "@Tasnimnews",
     "@farsna", "@iribnews", "@mehrnews",
     "@euronewspe", "@bbcpersian", "@farhikhteganonline",
-    "@akharinkhabar", "@khabarfouri"
+    "@akharinkhabar", "@khabarfouri",
 }
 
 SOURCE_NAMES = {
-    "@AjaNews":       "الجزیره",
     "@irna_1313":     "ایرنا",
     "@isna94":        "ایسنا",
     "@Tasnimnews":    "تسنیم",
@@ -52,5 +50,5 @@ SOURCE_NAMES = {
     "@bbcpersian":    "بی‌بی‌سی فارسی",
     "@farhikhteganonline": "فرهیختگان",
     "@akharinkhabar": "آخرین خبر",
-    "@khabarfouri":   "خبر فوری"
+    "@khabarfouri":   "خبر فوری",
 }
