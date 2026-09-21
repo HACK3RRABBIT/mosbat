@@ -122,8 +122,9 @@
           <span id="ai-toggle-label">Off</span>
         </label>
       </div>
-      <p class="muted">An LLM gate drops ads and "follow us" promos and
-        de-duplicates repeats before they reach Telegram or Bale.</p>
+      <p class="muted">A TypeSafe gate drops ads and "follow us" promos and
+        de-duplicates the same event reported by different sources, before
+        they reach Telegram or Bale.</p>
       <p class="muted" style="margin-top:10px;display:flex;align-items:center;gap:10px">
         <label class="toggle">
           <input type="checkbox" id="media-toggle" onchange="toggleMedia()">
@@ -133,10 +134,9 @@
         Drop photos, videos, albums and files with no caption
       </p>
       <div class="kv-edit">
-        <div><label>Base URL</label><input id="ai_base" placeholder="http://…/v1"></div>
-        <div><label>Model</label><input id="ai_model" placeholder="UN/claude-opus-5"></div>
-        <div><label>API key</label><input id="ai_key" type="password" placeholder="sk-…"></div>
-        <div><label>Dedup window (sec)</label><input id="ai_ttl" placeholder="86400"></div>
+        <div><label>Model</label><input id="ai_model" placeholder="jev-latest"></div>
+        <div><label>API key</label><input id="ai_key" type="password" placeholder="apikey_…"></div>
+        <div><label>Dedup window (sec)</label><input id="ai_ttl" placeholder="10800"></div>
       </div>
       <div class="actions-row">
         <button class="btn primary" onclick="saveAI()">Save AI settings</button>
@@ -224,7 +224,6 @@ async function refreshAI(){
   const m = document.getElementById('media-toggle');
   m.checked = !!s.media_gate;
   document.getElementById('media-toggle-label').textContent = s.media_gate ? 'On' : 'Off';
-  document.getElementById('ai_base').value = s.base_url || '';
   document.getElementById('ai_model').value = s.model || '';
   if (s.api_key_masked) document.getElementById('ai_key').placeholder = s.api_key_masked;
   document.getElementById('ai_ttl').value = s.dedup_ttl_seconds || '';
@@ -243,12 +242,11 @@ async function toggleMedia(){
   document.getElementById('media-toggle-label').textContent = d.media_gate ? 'On' : 'Off';
 }
 async function saveAI(){
-  const b = document.getElementById('ai_base').value;
   const m = document.getElementById('ai_model').value;
   const k = document.getElementById('ai_key').value;
   const t = document.getElementById('ai_ttl').value;
   const d = await fetch('/api/ai/save', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:'base_url='+encodeURIComponent(b)+'&model='+encodeURIComponent(m)+'&api_key='+encodeURIComponent(k)+'&dedup_ttl_seconds='+encodeURIComponent(t)}).then(r=>r.json());
+    body:'model='+encodeURIComponent(m)+'&api_key='+encodeURIComponent(k)+'&dedup_ttl_seconds='+encodeURIComponent(t)}).then(r=>r.json());
   document.getElementById('ai-hint').textContent = d.ok ? 'Saved — bots reload live.' : ('Failed: ' + d.error);
   await refreshAI();
 }

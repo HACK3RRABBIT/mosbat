@@ -1,25 +1,30 @@
 """
-ai_filter.py — LLM news gate for mosbat.
+ai_filter.py — TypeSafe news gate for mosbat.
 
 One async entry point, decide(text, source), used by telegram_bot.py BEFORE a
 message is written to the queue (which feeds both the Telegram approval flow
-and the Bale bot). Each message gets a single LLM call that returns JSON:
+and the Bale bot). Each message gets a single TypeSafe System One request that
+asks two kinds of typed questions in parallel:
 
-    {"relay": bool, "topic": "<canonical phrase>", "reason": "<brief>"}
+  1. Useless-news filter — a Choice question classifies the item as news, an
+     ad, self-promotion, chatter, or other. Only "news" relays.
+  2. Deduplication — one Noul question per recently-relayed item ("does this
+     report the same underlying event as recent item i?"), batched into the
+     SAME request. This asks the model directly rather than comparing an
+     LLM-invented "topic phrase" via local word overlap, so a paraphrased
+     duplicate from a different source (different wording, same event) is
+     still caught.
 
-Three jobs in that one call:
-  1. Useless-news filter — drop ads, "follow us" promos, pure link-spam,
-     chatter, sports scores, etc.
-  2. Deduplication — the LLM returns a short canonical `topic` phrase; we
-     compare it against recently relayed topics (TTL-bounded) so the same
-     story from IRNA and ISNA collides and only the first is sent.
-  3. Logging — every decision is logged for the WebUI Logs view + stats.
+Both questions ride in one System One call — TypeSafe's own guidance is that
+adding more Noul questions barely changes response time, since they all run
+in parallel against the same state. The recent-items window is kept small
+(max_history, TTL-bounded) so the per-message question count stays bounded.
 
-Fail-open: if the LLM is unreachable or times out, we RELAY (don't silently
+Fail-open: if TypeSafe is unreachable or times out, we RELAY (don't silently
 drop real news). We log the failure instead.
 
-State: a JSONL store under the project (gitignored) holding recent topics
-with timestamps. Kept small (max_history entries, TTL expiry).
+State: a JSONL store under the project (gitignored) holding recent relayed
+item texts with timestamps, used to build the dedup candidate list.
 """
 from __future__ import annotations
 
@@ -41,7 +46,7 @@ STATS_FILE = os.path.join(PROJ, "ai_stats.json")
 _lock = threading.Lock()
 _settings: dict = {}
 _settings_mtime: float = -1.0    # so external edits (e.g. WebUI toggle) reload live
-_store: list[dict] = []          # [{topic, ts}]
+_store: list[dict] = []          # [{text, ts}], oldest first
 _stats = {"checked": 0, "relayed": 0, "dropped_useless": 0, "dropped_dup": 0,
           "dropped_media": 0, "errors": 0}
 # Monotonic telemetry (epoch seconds): the newest message we saw / relayed.
@@ -53,16 +58,13 @@ _last_relayed = 0.0
 def load_settings() -> dict:
     global _settings
     defaults = {
-        "base_url": "http://51.15.120.148:20128/v1",
         "api_key": "",
-        "model": "UN/claude-opus-5",
+        "model": "jev-latest",
         "enabled": True,
-        "dedup_ttl_seconds": 86400,
-        "max_history": 800,
-        "timeout_seconds": 25,
-        "decide_timeout_seconds": 45,
-        "max_tokens": 1200,
-        "dedup_jaccard": 0.6,
+        "dedup_ttl_seconds": 10800,     # 3h — same-event cross-source coverage window
+        "max_history": 30,              # cap on dedup candidates sent per request
+        "dedup_threshold": 0.72,        # Noul probability above which we call it a dup
+        "decide_timeout_seconds": 30,
         "media_gate": True,
         "media_gate_types": ["photo", "video", "album_photo", "album_video", "file"],
     }
@@ -74,8 +76,6 @@ def load_settings() -> dict:
     # env overrides
     if os.environ.get("MOSBAT_AI_KEY"):
         data["api_key"] = os.environ["MOSBAT_AI_KEY"]
-    if os.environ.get("MOSBAT_AI_BASE"):
-        data["base_url"] = os.environ["MOSBAT_AI_BASE"]
     if os.environ.get("MOSBAT_AI_MODEL"):
         data["model"] = os.environ["MOSBAT_AI_MODEL"]
     defaults.update(data)
@@ -137,7 +137,7 @@ def set_enabled(on: bool) -> bool:
         return is_enabled()
 
 
-# ── Dedup store ──────────────────────────────────
+# ── Dedup store (recent relayed item texts, used as TypeSafe Noul candidates) ──
 
 def _load_store():
     global _store
@@ -149,26 +149,13 @@ def _load_store():
 
 
 def _prune_store():
-    ttl = _settings.get("dedup_ttl_seconds", 86400)
+    ttl = _settings.get("dedup_ttl_seconds", 10800)
     now = time.time()
     cutoff = now - ttl
     _store[:] = [e for e in _store if e.get("ts", 0) > cutoff]
-    max_h = _settings.get("max_history", 800)
+    max_h = _settings.get("max_history", 30)
     if len(_store) > max_h:
         _store[:] = _store[-max_h:]
-
-
-def _is_duplicate(topic: str) -> bool:
-    if not topic:
-        return False
-    key = _norm(topic)
-    thresh = _settings.get("dedup_jaccard", 0.6)
-    for e in _store:
-        if _norm(e["topic"]) == key:
-            return True
-        if _jaccard(e["topic"], topic) >= thresh:
-            return True
-    return False
 
 
 _last_store_flush = 0.0
@@ -199,8 +186,8 @@ def _rewrite_store():
         log.warning("ai_filter _rewrite_store failed: %s", e)
 
 
-def _remember(topic: str):
-    _store.append({"topic": topic, "ts": time.time()})
+def _remember(text: str):
+    _store.append({"text": text[:400], "ts": time.time()})
     before = len(_store)
     _prune_store()
     pruned = len(_store) < before
@@ -216,106 +203,56 @@ def _remember(topic: str):
         _rewrite_store()
 
 
-def _norm(s: str) -> str:
-    s = (s or "").lower()
-    s = re.sub(r"[^\w\s؀-ۿ]", " ", s)   # keep persian + word chars
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+# ── TypeSafe System One call ──────────────────────
+
+_CATEGORIES = {
+    "news": ("Genuine news: politics, government, economy, war or conflict, "
+             "accidents or disasters, major court rulings, science or health "
+             "breakthroughs, weather alerts, or nationally significant sports results."),
+    "ad": "Advertising or sponsored content.",
+    "self_promo": 'Self-promotion: "follow us", "subscribe", "join our channel".',
+    "chatter": "Routine social chatter, polls, or trivia with no real news content.",
+    "other": "Pure link-sharing with no real substance, or anything else that isn't genuine news.",
+}
 
 
-def _tokens(s: str) -> set[str]:
-    return set(_norm(s).split())
-
-
-def _jaccard(a: str, b: str) -> float:
-    ta, tb = _tokens(a), _tokens(b)
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
-
-
-# ── LLM call (SSE streaming, extract final JSON) ──
-
-_PROMPT = """You are a strict news editor for a Persian news relay channel.
-Decide whether the item below should be relayed to the channel.
-
-Relay (relay:true) only genuine news: politics, government, economy, war/conflict,
-accidents/disasters, major court rulings, science/health breakthroughs, weather
-alerts, significant sports RESULTS only if nationally important.
-
-Do NOT relay (relay:false) if the item is: advertising or sponsored content,
-self-promotion ("follow us", "subscribe", "join our channel"), pure link-sharing
-with no real substance, routine social/chatter, polls, trivia, or an exact
-repost of something already covered.
-
-Also detect duplicates: if this is the SAME underlying event as something already
-reported (different wording is fine), set relay:false and topic to the existing
-event phrase.
-
-CRITICAL: You MUST finish by printing a single JSON object on its own line.
-Do not stop inside a thinking block. If you think, do it briefly, THEN output
-exactly this (no markdown fences, no commentary, no trailing text):
-
-{"relay": true|false, "topic": "<canonical phrase, <=8 words, in Persian if source is Persian, identifying the unique event>", "reason": "<one short sentence>"}
-
-Source channel: __SOURCE__
-Item text:
-__TEXT__"""
-
-
-def _extract_json(text: str) -> dict | None:
-    # strip a <think>...</think> reasoning block (hy3-free emits one)
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
-        return None
-    try:
-        return json.loads(text[start:end + 1])
-    except Exception:
-        return None
-
-
-async def _call_llm(text: str, source: str) -> dict:
-    import httpx
+async def _call_typesafe(text: str, source: str, candidates: list[str]) -> dict:
+    from typesafe_sdk import AsyncTypeSafeClient, Choice, Noul
     s = get_settings()
-    payload = {
-        "model": s["model"],
-        "max_tokens": s.get("max_tokens", 200),
-        "messages": [{"role": "user", "content": _PROMPT.replace("__SOURCE__", source).replace("__TEXT__", text)}],
-        "stream": True,
+
+    questions = {
+        "quality": Choice(
+            instructions=f"What kind of content is this item from Persian news source '{source}'?",
+            criteria=_CATEGORIES,
+        ),
     }
-    headers = {
-        "Authorization": f"Bearer {s['api_key']}",
-        "Content-Type": "application/json",
+    for i in range(len(candidates)):
+        questions[f"dup_{i}"] = Noul(
+            instructions=(
+                f"Does `article.text` report the same underlying news event as "
+                f"`recent[{i}].text`? Different wording, source, or level of "
+                f"detail describing the same event still counts as yes."
+            ),
+        )
+
+    state = {
+        "article": {"text": text},
+        "recent": [{"text": c} for c in candidates],
     }
-    # Explicit connect + read timeouts. A read timeout is what actually bounds a
-    # streaming response that never emits [DONE] — without it the loop waits
-    # forever and Telethon stops receiving updates.
-    to = httpx.Timeout(connect=10.0, read=s.get("timeout_seconds", 25), write=10.0, pool=10.0)
-    collected = []
-    async with httpx.AsyncClient(timeout=to) as client:
-        async with client.stream("POST", f"{s['base_url']}/chat/completions",
-                                 headers=headers, json=payload) as resp:
-            async for line in resp.aiter_lines():
-                if not line:
-                    continue
-                if line.startswith("data: "):
-                    data = line[6:]
-                    if data.strip() == "[DONE]":
-                        break
-                    try:
-                        obj = json.loads(data)
-                    except Exception:
-                        continue
-                    delta = obj.get("choices", [{}])[0].get("delta", {})
-                    if "content" in delta:
-                        collected.append(delta["content"])
-    full = "".join(collected)
-    parsed = _extract_json(full)
-    if parsed is None:
-        raise ValueError(f"no JSON in LLM output: {full[:120]}")
-    return parsed
+
+    async with AsyncTypeSafeClient(api_key=s["api_key"]) as client:
+        response = await client.system_one(
+            state=state, questions=questions, model=s.get("model", "jev-latest"))
+
+    category = response.choices["quality"].choice
+    threshold = s.get("dedup_threshold", 0.72)
+    dup_index, dup_prob = None, 0.0
+    for i in range(len(candidates)):
+        p = response.nouls[f"dup_{i}"].noul
+        if p >= threshold and p > dup_prob:
+            dup_index, dup_prob = i, p
+
+    return {"category": category, "dup_index": dup_index, "dup_prob": dup_prob}
 
 
 # ── Public API ───────────────────────────────────
@@ -346,7 +283,7 @@ def media_gate_check(mtype: str, text: str) -> tuple[bool, str]:
 
     Photos, photo/video albums, standalone videos and documents that carry NO
     real caption (the user wants only captioned media relayed) are dropped. This
-    is a cheap syntactic rule — no LLM call — so it runs before decide(). A bare
+    is a cheap syntactic rule — no API call — so it runs before decide(). A bare
     emoji caption (e.g. just '📸') is treated as no caption.
 
     Returns (dropped: bool, reason: str).
@@ -362,80 +299,66 @@ def media_gate_check(mtype: str, text: str) -> tuple[bool, str]:
     return (True, f"caption-less {mtype}")
 
 
-def _decide_sync(text: str, source: str = "") -> dict:
-    """Synchronous core of the AI gate. MUST be run OUTSIDE Telethon's event
-    loop via decide() so a slow LLM call can never block Telegram updates."""
-    global _stats, _last_received, _last_relayed
+async def _decide_async(text: str, source: str = "") -> dict:
+    global _last_received, _last_relayed
     _last_received = time.time()
     with _lock:
         _stats["checked"] += 1
 
     if not is_enabled():
-        return {"relay": True, "reason": "AI filter disabled", "topic": "", "dropped": None}
+        return {"relay": True, "reason": "AI filter disabled", "match": None, "dropped": None}
 
-    # Retry once on a generation flake (model emits only <think></think> and
-    # stops before the JSON).
-    result = None
-    last_err = None
-    for attempt in range(2):
-        try:
-            result = asyncio.run(_call_llm(text, source))
-            if isinstance(result, dict) and "relay" in result:
-                break
-        except Exception as e:
-            last_err = e
-            continue
-    if result is None:
+    candidates = [e["text"] for e in _store]
+    try:
+        result = await _call_typesafe(text, source, candidates)
+    except Exception as e:
         with _lock:
             _stats["errors"] += 1
-        log.warning("ai_filter LLM error (fail-open): %s", last_err)
-        return {"relay": True, "reason": f"LLM error, relayed: {last_err}", "topic": "", "dropped": "error"}
+        log.warning("ai_filter TypeSafe error (fail-open): %s", e)
+        return {"relay": True, "reason": f"TypeSafe error, relayed: {e}", "match": None, "dropped": "error"}
 
-    relay = bool(result.get("relay"))
-    topic = (result.get("topic") or "").strip()
-    reason = (result.get("reason") or "").strip()
-
-    if not relay:
+    if result["category"] != "news":
         with _lock:
             _stats["dropped_useless"] += 1
-        log.info("AI DROP (useless): src=%s reason=%s", source, reason)
-        return {"relay": False, "reason": reason or "not newsworthy", "topic": topic, "dropped": "useless"}
+        log.info("AI DROP (%s): src=%s", result["category"], source)
+        return {"relay": False, "reason": result["category"], "match": None, "dropped": "useless"}
 
-    # dedup against recent topics
-    if _is_duplicate(topic):
+    if result["dup_index"] is not None:
         with _lock:
             _stats["dropped_dup"] += 1
-        log.info("AI DROP (duplicate): topic=%s", topic)
-        return {"relay": False, "reason": f"duplicate of recent: {topic}", "topic": topic, "dropped": "duplicate"}
+        matched = candidates[result["dup_index"]]
+        log.info("AI DROP (duplicate, p=%.2f): src=%s matched=%s",
+                 result["dup_prob"], source, matched[:80])
+        return {"relay": False, "reason": f"duplicate (p={result['dup_prob']:.2f})",
+                 "match": matched, "dropped": "duplicate"}
 
-    _remember(topic)
+    _remember(text)
     with _lock:
         _stats["relayed"] += 1
         _last_relayed = time.time()
     _flush_throttled()
-    log.info("AI RELAY: topic=%s src=%s", topic, source)
-    return {"relay": True, "reason": reason or "news", "topic": topic, "dropped": None}
+    log.info("AI RELAY: src=%s", source)
+    return {"relay": True, "reason": "news", "match": None, "dropped": None}
 
 
 async def decide(text: str, source: str = "") -> dict:
-    """Run the AI gate off Telethon's event loop with a hard wall-clock deadline.
+    """Run the AI gate with a hard wall-clock deadline.
 
-    The LLM call is CPU/IO-bound and can hang; if we awaited it ON the event
-    loop, Telegram updates would stop being read and the whole forwarder would
-    freeze (seen in production: a stalled SSE stream left a CLOSE-WAIT socket and
-    no news for 2h). We run the sync core in a thread with asyncio.wait_for so a
-    slow/hung model can only delay that one message — never the intake loop.
-    Fail-open: on timeout/error we RELAY.
+    AsyncTypeSafeClient is asyncio-native, so this awaits directly on
+    Telethon's event loop — no thread hop needed. asyncio.wait_for is still
+    the enforced deadline regardless of what the SDK's own timeout does
+    internally: a slow/hung call must only ever delay this one message, never
+    freeze intake (seen in production before: a stalled request left the
+    forwarder receiving no news for 2h). Fail-open: on timeout/error we RELAY.
     """
     deadline = get_settings().get("decide_timeout_seconds", 30)
     try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(_decide_sync, text, source), timeout=deadline)
+        return await asyncio.wait_for(_decide_async(text, source), timeout=deadline)
     except Exception as e:
         with _lock:
             _stats["errors"] += 1
         log.warning("ai_filter decide timed out/failed (fail-open): %s", e)
-        return {"relay": True, "reason": f"decide error, relayed: {e}", "topic": "", "dropped": "error"}
+        return {"relay": True, "reason": f"decide error, relayed: {e}", "match": None, "dropped": "error"}
 
 
 def mark_received():

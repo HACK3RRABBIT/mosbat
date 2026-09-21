@@ -446,7 +446,7 @@ def api_ai_reset(request: Request):
 
 @app.post("/api/ai/save")
 async def api_ai_save(request: Request,
-                      base_url: str = Form(""), model: str = Form(""),
+                      model: str = Form(""),
                       api_key: str = Form(""), dedup_ttl_seconds: str = Form("")):
     check_auth(request)
     try:
@@ -455,12 +455,10 @@ async def api_ai_save(request: Request,
                 data = json.load(f)
         except Exception:
             data = {}
-        if base_url.strip():
-            data["base_url"] = base_url.strip()
         if model.strip():
             data["model"] = model.strip()
         # Only overwrite the key if a real (non-masked) value was provided.
-        if api_key.strip() and not api_key.strip().startswith("sk-…"):
+        if api_key.strip() and not api_key.strip().startswith("•••…"):
             data["api_key"] = api_key.strip()
         if dedup_ttl_seconds.strip():
             try:
@@ -581,7 +579,7 @@ def _ai_public_settings() -> dict:
     out = {k: v for k, v in s.items() if k != "api_key"}
     key = s.get("api_key") or ""
     out["api_key_set"] = bool(key)
-    out["api_key_masked"] = ("sk-…" + key[-4:]) if len(key) > 4 else ""
+    out["api_key_masked"] = ("•••…" + key[-4:]) if len(key) > 4 else ""
     out["enabled"] = ai_filter.is_enabled()
     out["media_gate"] = bool(s.get("media_gate", True))
     return out
