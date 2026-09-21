@@ -3,41 +3,54 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}mosbat{% endblock %} · Control</title>
+<title>{% block title %}mosbat{% endblock %} · Wire desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Vazirmatn:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<div class="app">
-  <aside class="sidebar">
-    <div class="brand">
-      <span class="logo">🐦</span>
-      <div>
-        <div class="brand-name">mosbat</div>
-        <div class="brand-sub">news relay control</div>
-      </div>
+<div class="shell">
+  <aside class="spine">
+    <div class="wordmark">
+      <span class="name">mosbat</span>
+      <span class="tagline">Persian news wire</span>
     </div>
     <nav class="nav">
-      <a href="/" class="{% if active=='home' %}on{% endif %}"><span class="ic">▦</span>Dashboard</a>
-      <a href="/bots" class="{% if active=='bots' %}on{% endif %}"><span class="ic">⚙</span>Bots</a>
-      <a href="/logs?which=telegram" class="{% if active=='logs' %}on{% endif %}"><span class="ic">≣</span>Logs</a>
-      <a href="/setup" class="{% if active=='setup' %}on{% endif %}"><span class="ic">✦</span>Setup</a>
+      <a href="/" class="{% if active=='home' %}on{% endif %}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 13h5l2.2-7.5L14 19l2.3-6h5.2"/></svg>
+        Dashboard
+      </a>
+      <a href="/bots" class="{% if active=='bots' %}on{% endif %}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><circle cx="7" cy="7.5" r="1"/><circle cx="7" cy="16.5" r="1"/></svg>
+        Bots
+      </a>
+      <a href="/channels" class="{% if active=='channels' %}on{% endif %}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6.5" r="1.4"/><path d="M9.5 6.5h9.5"/><circle cx="5" cy="12" r="1.4"/><path d="M9.5 12h9.5"/><circle cx="5" cy="17.5" r="1.4"/><path d="M9.5 17.5h9.5"/></svg>
+        Channels
+      </a>
+      <a href="/logs?which=telegram" class="{% if active=='logs' %}on{% endif %}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9.5 10 12l-3 2.5M12.5 14.5h4.5"/></svg>
+        Logs
+      </a>
+      <a href="/setup" class="{% if active=='setup' %}on{% endif %}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h9M17 6h3M4 12h3M9 12h11M4 18h13M20 18h0"/><circle cx="12.5" cy="6" r="2"/><circle cx="6.5" cy="12" r="2"/><circle cx="17.5" cy="18" r="2"/></svg>
+        Settings
+      </a>
     </nav>
-    <div class="side-foot">
-      <div class="sys-state">
-        <span class="dot" id="nav-dot"></span>
-        <span id="nav-state">loading…</span>
-      </div>
-      <a href="#" id="logout" class="logout">Sign out</a>
+    <div class="spine-foot">
+      <span class="status" id="nav-status"><span class="dot"></span><span id="nav-status-text">loading…</span></span>
+      <a href="#" id="logout" class="signout">Sign out</a>
     </div>
   </aside>
 
   <main class="content">
-    <header class="topbar">
+    <header class="masthead">
       <div>
-        <div class="crumb">{% block crumb %}Dashboard{% endblock %}</div>
+        <div class="status" id="mast-status">{% block mast_status %}&nbsp;{% endblock %}</div>
         <h1>{% block h1 %}Dashboard{% endblock %}</h1>
       </div>
-      {% block topbar_right %}{% endblock %}
+      <div class="masthead-right">{% block topbar_right %}{% endblock %}</div>
     </header>
     <section class="page">{% block content %}{% endblock %}</section>
   </main>
@@ -47,16 +60,15 @@
   document.getElementById('logout')?.addEventListener('click', async (e) => {
     e.preventDefault(); await fetch('/logout'); location.href = '/login';
   });
-  // sidebar live master state
   async function navState() {
     try {
       const d = await fetch('/api/status').then(r => r.ok ? r.json() : null);
       if (!d) return;
-      const dot = document.getElementById('nav-dot');
-      const lbl = document.getElementById('nav-state');
+      const el = document.getElementById('nav-status');
+      const txt = document.getElementById('nav-status-text');
       const on = d.master_running;
-      dot.className = 'dot ' + (on ? 'ok' : 'bad');
-      lbl.textContent = on ? 'Supervisor online' : 'Supervisor off';
+      el.className = 'status ' + (on ? 'ok live' : 'bad');
+      txt.textContent = on ? 'Wire desk online' : 'Supervisor off';
     } catch (e) {}
   }
   navState(); setInterval(navState, 4000);

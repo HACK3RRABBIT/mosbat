@@ -8,13 +8,15 @@ Requirements: pip install requests telethon
 Run: python bale_bot.py
 """
 
+import hashlib
 import io
 import json
 import logging
 import os
+import sys
 import time
-import gc
 import threading
+from logging.handlers import RotatingFileHandler
 
 import requests
 from telethon.sync import TelegramClient
@@ -30,7 +32,10 @@ from shared import bold_first_para, clean_text
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
-    stream=__import__("sys").stdout,
+    handlers=[
+        RotatingFileHandler("bale_bot.log", maxBytes=5 * 1024 * 1024, backupCount=2),
+        logging.StreamHandler(sys.stdout),
+    ],
 )
 log = logging.getLogger(__name__)
 
@@ -98,6 +103,14 @@ def _save_seen(seen):
             json.dump(items, f)
     except:
         pass
+
+def _line_key(line: str) -> str:
+    """Stable content hash for the 'seen' dedup set. Python's built-in hash()
+    is randomized per-process (PYTHONHASHSEED), so a set of hash() keys
+    persisted to SEEN_FILE would silently stop matching after every restart —
+    causing the whole queue backlog to be re-downloaded and re-sent."""
+    return hashlib.sha1(line.encode("utf-8")).hexdigest()
+
 
 def _load_offset():
     try:
@@ -318,8 +331,6 @@ def send_to_channel(entry):
         log.info("Sent to Bale channel")
     except Exception as e:
         log.error("Failed to send to Bale channel: %s", e)
-    finally:
-        gc.collect()
 
 
 # ── Ask admin approval ────────────────────────
@@ -421,7 +432,7 @@ def process_queue(seen):
         line = line.strip()
         if not line:
             continue
-        line_key = str(hash(line))
+        line_key = _line_key(line)
         if line_key in seen:
             continue
         try:
@@ -454,7 +465,7 @@ def process_queue_one(seen):
         log.warning("Queue read error: %s", e)
         return seen
 
-    pending_count = sum(1 for l in lines if l.strip() and str(hash(l.strip())) not in seen)
+    pending_count = sum(1 for l in lines if l.strip() and _line_key(l.strip()) not in seen)
     if pending_count > 0:
         log.info("Queue: %d lines total, %d pending", len(lines), pending_count)
 
@@ -462,7 +473,7 @@ def process_queue_one(seen):
         line = line.strip()
         if not line:
             continue
-        line_key = str(hash(line))
+        line_key = _line_key(line)
         if line_key in seen:
             continue
         try:
@@ -782,7 +793,6 @@ def run():
             if time.time() - last_cleanup > 3600:
                 cleanup_old_media()
                 last_cleanup = time.time()
-                gc.collect()
 
         except KeyboardInterrupt:
             log.info("Shutting down.")

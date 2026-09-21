@@ -171,14 +171,49 @@ def _is_duplicate(topic: str) -> bool:
     return False
 
 
+_last_store_flush = 0.0
+_STORE_FLUSH_EVERY = 60.0  # seconds
+
+
+def _rewrite_store():
+    """Rewrite STORE_FILE to match the pruned in-memory _store.
+
+    _remember() below only *appends* on the hot path — pruning by TTL/
+    max_history only trims the in-memory list, so without this the file would
+    grow forever regardless of the configured cap (a real disk-space leak on a
+    storage-constrained box). Throttled like _flush_throttled() so a full
+    rewrite doesn't happen on every single message.
+    """
+    global _last_store_flush
+    now = time.time()
+    if now - _last_store_flush < _STORE_FLUSH_EVERY:
+        return
+    _last_store_flush = now
+    try:
+        tmp = STORE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            for e in _store:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        os.replace(tmp, STORE_FILE)
+    except Exception as e:
+        log.warning("ai_filter _rewrite_store failed: %s", e)
+
+
 def _remember(topic: str):
     _store.append({"topic": topic, "ts": time.time()})
+    before = len(_store)
     _prune_store()
+    pruned = len(_store) < before
+    # Always append so the new entry is never lost even if the compacting
+    # rewrite below is throttled — _rewrite_store() will clean up stale
+    # appended-but-pruned lines the next time it actually runs.
     try:
         with open(STORE_FILE, "a") as f:
             f.write(json.dumps(_store[-1], ensure_ascii=False) + "\n")
     except Exception:
         pass
+    if pruned:
+        _rewrite_store()
 
 
 def _norm(s: str) -> str:
@@ -290,28 +325,6 @@ def media_gate_enabled() -> bool:
     with _lock:
         return bool(_settings.get("media_gate"))
 
-
-def media_gate_check(mtype: str, text: str) -> tuple[bool, str]:
-    """Deterministic gate for caption-less media.
-
-    Photos, photo/video albums, standalone videos and documents that carry NO
-    real caption (the user wants only captioned media relayed) are dropped. This
-    is a cheap syntactic rule — no LLM call — so it runs before decide().
-
-    Returns (dropped: bool, reason: str).
-    """
-    if not media_gate_enabled():
-        return (False, "")
-    if mtype not in _settings.get("media_gate_types", ["photo", "video", "album_photo", "album_video", "file"]):
-        return (False, "")
-    if (text or "").strip():
-        return (False, "")
-    with _lock:
-        _stats["dropped_media"] += 1
-    return (True, f"caption-less {mtype}")
-
-
-# ── Public API ───────────────────────────────────
 
 # match lone media/decorative emoji so "📸" / "🎥" alone counts as no caption
 _EMOJI_RE = re.compile(

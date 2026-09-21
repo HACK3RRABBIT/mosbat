@@ -11,6 +11,7 @@ import gc
 import json
 import os
 import time as _time
+from logging.handlers import RotatingFileHandler
 
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import MessageMediaWebPage
@@ -30,11 +31,15 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
     handlers=[
-        logging.FileHandler("telegram_bot.log"),
+        RotatingFileHandler("telegram_bot.log", maxBytes=5 * 1024 * 1024, backupCount=2),
         logging.StreamHandler(),
     ]
 )
 log = logging.getLogger(__name__)
+
+# Hard cap on media buffered into RAM per message — a userbot on a 900MB box
+# has no business holding an unbounded video in memory. Mirrors BALE_MAX_VIDEO_BYTES.
+MAX_MEDIA_BYTES = 50 * 1024 * 1024
 
 userbot = TelegramClient("forwarder_user", API_ID, API_HASH)
 bot     = TelegramClient("forwarder_bot",  API_ID, API_HASH)
@@ -54,15 +59,22 @@ album_timers     = {}
 edit_pending     = {}
 sent_keys        = set()
 
-# Runtime-editable source channels (loaded from config, can be changed via commands)
+# Runtime-editable source channels (loaded from config, can be changed via commands
+# or the WebUI). active_channel_ids is the resolved-entity-id mirror of
+# active_channels that the live event filter actually uses — see the note above
+# on_new_message() for why this indirection exists.
 active_channels  = list(SOURCE_CHANNELS)
 active_persian   = set(PERSIAN_CHANNELS)
 active_names     = dict(SOURCE_NAMES)
+active_channel_ids = set()   # resolved Telethon entity ids for active_channels
+_channels_mtime  = -1.0
 
 QUEUE_FILE      = "/tmp/feeder_queue.jsonl"
 MAX_QUEUE_LINES = 200
 CHANNELS_FILE   = "/tmp/feeder_channels.json"  # shared with bale_bot
 STATE_FILE      = "/tmp/feeder_tg_state.json"
+_queue_write_count = 0
+QUEUE_TRIM_EVERY   = 20  # only re-read+trim the queue file every N writes
 
 MAIN_ADMIN_ID   = TG_MAIN_ADMIN
 
@@ -103,7 +115,7 @@ def save_channels():
         log.warning("save_channels failed: %s", e)
 
 def load_channels():
-    global active_channels, active_persian, active_names
+    global active_channels, active_persian, active_names, _channels_mtime
     if os.path.exists(CHANNELS_FILE):
         try:
             with open(CHANNELS_FILE) as f:
@@ -111,6 +123,7 @@ def load_channels():
             active_channels = data.get("channels", list(SOURCE_CHANNELS))
             active_persian  = set(data.get("persian", list(PERSIAN_CHANNELS)))
             active_names    = data.get("names", dict(SOURCE_NAMES))
+            _channels_mtime = os.path.getmtime(CHANNELS_FILE)
             log.info("Loaded %d source channels from disk", len(active_channels))
         except Exception as e:
             log.warning("load_channels failed: %s", e)
@@ -124,9 +137,52 @@ def get_channel_list_text():
     return "\n".join(lines)
 
 
+# ── Live channel-entity resolution ────────────
+# events.NewMessage(chats=...) resolves its `chats` argument to a fixed set of
+# entity ids ONCE, when the handler is registered — reassigning the
+# active_channels list afterward (from /addchannel or a WebUI edit) has no
+# effect on what the listener actually receives. So instead of a chats= filter,
+# on_new_message()/on_edited_message() filter manually against
+# active_channel_ids, which this function keeps in sync with active_channels.
+
+async def sync_channel_ids():
+    """(Re)resolve active_channels to Telethon entity ids. Never removes an id
+    for a channel that fails to resolve (e.g. transient network hiccup) unless
+    it was actually dropped from active_channels."""
+    global active_channel_ids
+    resolved = set()
+    for ch in active_channels:
+        try:
+            ent = await userbot.get_entity(ch)
+            resolved.add(ent.id)
+        except Exception as e:
+            log.warning("Could not resolve channel %s: %s", ch, e)
+    active_channel_ids = resolved
+    log.info("Resolved %d/%d source channels to live entity ids",
+              len(resolved), len(active_channels))
+
+async def channels_reload_task(check_every: int = 20):
+    """Hot-reload CHANNELS_FILE (written by /addchannel, /removechannel, or the
+    WebUI) so channel management actually takes effect without a bot restart."""
+    global _channels_mtime
+    while True:
+        await asyncio.sleep(check_every)
+        try:
+            if not os.path.exists(CHANNELS_FILE):
+                continue
+            mtime = os.path.getmtime(CHANNELS_FILE)
+            if mtime == _channels_mtime:
+                continue
+            load_channels()
+            await sync_channel_ids()
+        except Exception as e:
+            log.warning("channels_reload_task error: %s", e)
+
+
 # ── Queue writer ──────────────────────────────
 
 def write_to_queue(entry: dict):
+    global _queue_write_count
     try:
         source_ids = entry.get("source_ids", [])
         record = {
@@ -140,6 +196,14 @@ def write_to_queue(entry: dict):
         }
         with open(QUEUE_FILE, "a") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        # Trimming to MAX_QUEUE_LINES needs a full read+rewrite — too expensive
+        # to do on every single message, so only check periodically. The file
+        # can drift a bit above the cap between checks; that's fine, it's just
+        # a rolling window for bale_bot's catch-up, not a hard limit.
+        _queue_write_count += 1
+        if _queue_write_count % QUEUE_TRIM_EVERY != 0:
+            return
         with open(QUEUE_FILE, "r") as f:
             lines = [l for l in f.readlines() if l.strip()]
         if len(lines) > MAX_QUEUE_LINES:
@@ -180,6 +244,11 @@ async def prepare_entry(msgs, source_username=""):
     files = []
     for m in msgs:
         if m.media and not isinstance(m.media, MessageMediaWebPage):
+            doc_size = getattr(getattr(m.media, "document", None), "size", 0) or 0
+            if doc_size > MAX_MEDIA_BYTES:
+                log.info("Skipping media msg %s: %.1fMB exceeds %.0fMB cap",
+                         m.id, doc_size / 1e6, MAX_MEDIA_BYTES / 1e6)
+                continue
             data = await download_media_bytes(m)
             if data:
                 mime = ("image/jpeg"
@@ -254,7 +323,6 @@ async def send_to_channel(entry) -> int | None:
     finally:
         for f in entry.get("files", []):
             f["data"] = b""
-        gc.collect()
 
 
 # ── Approval buttons ──────────────────────────
@@ -286,7 +354,6 @@ async def process_msgs(msgs, source_username=""):
         log.info("Media gate dropped %s from %s (no caption)", mtype, source_username)
         for f in entry.get("files", []):
             f["data"] = b""
-        gc.collect()
         return
 
     # ── AI news gate ──────────────────────────
@@ -302,7 +369,6 @@ async def process_msgs(msgs, source_username=""):
             # free media bytes, do not queue
             for f in entry.get("files", []):
                 f["data"] = b""
-            gc.collect()
             return
 
     write_to_queue(entry)  # always write — Bale bot reads this regardless of tg_active
@@ -311,7 +377,6 @@ async def process_msgs(msgs, source_username=""):
         # TG is stopped: free media bytes immediately and return
         for f in entry.get("files", []):
             f["data"] = b""
-        gc.collect()
         return
 
     source_name = active_names.get(source_username, source_username or "ناشناس")
@@ -467,6 +532,11 @@ async def cmd_addchannel(event):
     else:
         active_persian.discard(ch)
     save_channels()
+    try:
+        ent = await userbot.get_entity(ch)
+        active_channel_ids.add(ent.id)
+    except Exception as e:
+        log.warning("Could not resolve new channel %s: %s", ch, e)
 
     flag = "🇮🇷" if is_fa else "🌐"
     await event.respond(f"✅ Added: {flag} `{ch}` — {name}", parse_mode="markdown")
@@ -482,6 +552,7 @@ async def cmd_removechannel(event):
         active_names.pop(ch, None)
         active_persian.discard(ch)
         save_channels()
+        await sync_channel_ids()  # recompute — simplest way to drop the right id
         await event.respond(f"✅ Removed: `{ch}`", parse_mode="markdown")
         log.info("Removed channel: %s", ch)
     else:
@@ -585,8 +656,15 @@ async def handle_album(grouped_id, source_username):
         return
     await process_msgs(msgs, source_username=source_username)
 
-@userbot.on(events.NewMessage(chats=active_channels))
+@userbot.on(events.NewMessage())
 async def on_new_message(event):
+    # No chats= filter here on purpose: Telethon resolves a chats= argument to a
+    # fixed set of entity ids ONCE, at handler-registration time, so it could
+    # never reflect channels added/removed later via /addchannel or the WebUI.
+    # active_channel_ids is instead kept live by sync_channel_ids() /
+    # channels_reload_task(), and checked here on every event.
+    if event.chat_id not in active_channel_ids:
+        return
     msg = event.message
     if has_link(msg.message or ""):
         log.info("Skipped message id=%s (link)", msg.id)
@@ -607,8 +685,10 @@ async def on_new_message(event):
         return
     await process_msgs([msg], source_username=src)
 
-@userbot.on(events.MessageEdited(chats=active_channels))
+@userbot.on(events.MessageEdited())
 async def on_edited_message(event):
+    if event.chat_id not in active_channel_ids:
+        return
     msg = event.message
     key = make_key(msg.chat_id, msg.id)
     if key not in approved:
@@ -655,12 +735,12 @@ async def intake_watchdog(stale_after: int = 120, check_every: int = 30):
         if last < _BOT_STARTED_AT:
             ai_filter.mark_received()
             continue
-        if _BOT_STARTED_AT and (time.time() - _BOT_STARTED_AT) < stale_after:
+        if _BOT_STARTED_AT and (_time.time() - _BOT_STARTED_AT) < stale_after:
             continue  # haven't been up long enough to expect a verdict yet
-        if (time.time() - last) >= stale_after and userbot.is_connected():
+        if (_time.time() - last) >= stale_after and userbot.is_connected():
             log.warning("Intake stale %.0fs — restarting telegram_bot "
                         "(supervisor will respawn a fresh connection)",
-                        time.time() - last)
+                        _time.time() - last)
             import os as _os
             _os._exit(1)
 
@@ -699,6 +779,7 @@ async def main():
     ai_filter.mark_received()  # telemetry: this boot is the baseline, not stale disk data
     await userbot.start()
     log.info("Userbot logged in.")
+    await sync_channel_ids()
     await bot.start(bot_token=BOT_TOKEN)
     log.info("Telegram bot started. tg_active=%s tg_publish=%s", tg_active, tg_publish)
     await asyncio.gather(
@@ -706,6 +787,7 @@ async def main():
         bot.run_until_disconnected(),
         cleanup_task(),
         intake_watchdog(),
+        channels_reload_task(),
     )
 
 if __name__ == "__main__":

@@ -4,15 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>mosbat · Sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Vazirmatn:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="login-body">
 <div class="login-card">
-  <div class="brand big">
-    <span class="logo">🐦</span>
-    <div><div class="brand-name">mosbat</div><div class="brand-sub">news relay control</div></div>
+  <div class="wordmark">
+    <span class="name">mosbat</span>
+    <span class="tagline">Persian news wire</span>
   </div>
-  <p class="muted">Sign in to manage the relay.</p>
+  <p class="muted">Sign in to open the desk.</p>
   <form id="login-form">
     <input type="password" id="pw" placeholder="Access password" autofocus>
     <button type="submit">Sign in</button>
@@ -28,7 +31,7 @@
       body: 'password=' + encodeURIComponent(document.getElementById('pw').value)
     });
     if (r.ok) location.href = '/';
-    else document.getElementById('err').textContent = 'Incorrect password';
+    else document.getElementById('err').textContent = 'Wrong password — try again.';
   });
 </script>
 </body>

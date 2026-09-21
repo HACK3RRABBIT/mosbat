@@ -1,19 +1,13 @@
 {% extends "base.html" %}
 {% block title %}Bots{% endblock %}
 {% set active = 'bots' %}
-{% block crumb %}Bots{% endblock %}
-{% block h1 %}Bot control{% endblock %}
-
-{% block topbar_right %}
-  <div class="master-pill">
-    Supervisor <span class="pill {{ 'ok' if master_running else 'bad' }}">{{ 'ONLINE' if master_running else 'OFFLINE' }}</span>
-  </div>
-{% endblock %}
+{% block mast_status %}<span class="dot"></span><span id="mast-status-text">&nbsp;</span>{% endblock %}
+{% block h1 %}Bots{% endblock %}
 
 {% block content %}
 <div class="actions-row">
-  <button class="btn ok" onclick="ctrl('start','all')">Start all</button>
-  <button class="btn warn" onclick="ctrl('stop','all')">Stop all</button>
+  <button class="btn primary" onclick="ctrl('start','all')">Start all</button>
+  <button class="btn danger" onclick="ctrl('stop','all')">Stop all</button>
   <button class="btn" onclick="ctrl('restart','all')">Restart all</button>
   <span class="hint">Changes take effect in ~1s via the supervisor.</span>
 </div>
@@ -22,7 +16,7 @@
   {% for b in bots %}
   <div class="bot-row" id="row-{{ b.name }}">
     <div class="bot-row-main">
-      <span class="pill" id="pill-{{ b.name }}">…</span>
+      <span class="status" id="pill-{{ b.name }}"><span class="dot"></span><span>…</span></span>
       <div class="bot-id">
         <div class="bot-name">{{ b.name }}.py</div>
         <div class="bot-sub" id="sub-{{ b.name }}">
@@ -31,11 +25,11 @@
       </div>
     </div>
     {% if b.needs_login %}
-    <a class="btn warn" href="/setup">Needs login →</a>
+    <a class="btn danger" href="/setup">Needs login</a>
     {% else %}
     <div class="bot-actions">
-      <button class="btn ok" onclick="ctrl('start','{{ b.name }}')">Start</button>
-      <button class="btn warn" onclick="ctrl('stop','{{ b.name }}')">Stop</button>
+      <button class="btn primary" onclick="ctrl('start','{{ b.name }}')">Start</button>
+      <button class="btn danger" onclick="ctrl('stop','{{ b.name }}')">Stop</button>
       <button class="btn" onclick="ctrl('restart','{{ b.name }}')">Restart</button>
     </div>
     {% endif %}
@@ -53,17 +47,26 @@ async function ctrl(action, target) {
     body: `action=${action}&target=${target}`
   });
 }
+async function navMast(d) {
+  const running = d.bots.filter(b => b.running).length;
+  set('mast-status-text', d.master_running ? (running + '/' + d.bots.length + ' running') : 'supervisor off');
+  document.getElementById('mast-status').className = 'status ' + (running > 0 ? 'ok live' : 'bad');
+}
+function set(id, v){ const e = document.getElementById(id); if (e) e.textContent = v; }
+
 async function poll() {
   const r = await fetch('/api/status');
   if (!r.ok) { location.href = '/login'; return; }
   const d = await r.json();
+  navMast(d);
   for (const b of d.bots) {
     const pill = document.getElementById('pill-' + b.name);
     let label, cls;
-    if (b.needs_login) { label = 'NEEDS LOGIN'; cls = 'warn'; }
-    else if (b.running) { label = 'RUNNING'; cls = 'ok'; }
-    else { label = 'STOPPED'; cls = 'bad'; }
-    pill.textContent = label; pill.className = 'pill ' + cls;
+    if (b.needs_login) { label = 'needs login'; cls = 'warn'; }
+    else if (b.running) { label = 'running'; cls = 'ok live'; }
+    else { label = 'stopped'; cls = 'bad'; }
+    pill.className = 'status ' + cls;
+    pill.querySelector('span:last-child').textContent = label;
     const sub = document.getElementById('sub-' + b.name);
     if (sub) sub.textContent = `PID ${b.pid || '—'} · ` + (b.needs_login ? 'needs login' : (b.running ? 'running' : 'stopped'));
   }

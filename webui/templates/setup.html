@@ -1,35 +1,35 @@
 {% extends "base.html" %}
-{% block title %}Setup{% endblock %}
+{% block title %}Settings{% endblock %}
 {% set active = 'setup' %}
-{% block crumb %}Setup{% endblock %}
-{% block h1 %}Setup &amp; Telegram login{% endblock %}
+{% block mast_status %}<span class="dot"></span><span>&nbsp;</span>{% endblock %}
+{% block h1 %}Settings{% endblock %}
 
 {% block content %}
 <div class="setup-grid">
 
   <!-- LEFT: stepper -->
   <section class="panel">
-    <div class="panel-head"><h2>Go-live steps</h2></div>
+    <div class="panel-head"><h2>Go live</h2></div>
     <ol class="stepper" id="stepper">
       <li data-step="creds">
-        <span class="step-ic">①</span>
+        <span class="step-num">1</span>
         <div><div class="step-t">API credentials</div>
         <div class="step-d" id="creds-d">config.py API_ID / API_HASH present</div></div>
       </li>
       <li data-step="login">
-        <span class="step-ic">②</span>
+        <span class="step-num">2</span>
         <div><div class="step-t">Telegram login</div>
-        <div class="step-d" id="login-d">create forwarder_user session</div></div>
+        <div class="step-d" id="login-d">create the forwarder_user session</div></div>
       </li>
       <li data-step="baledl">
-        <span class="step-ic">③</span>
+        <span class="step-num">3</span>
         <div><div class="step-t">Bale downloader session</div>
         <div class="step-d" id="baledl-d">forwarder_bale_dl.session</div></div>
       </li>
       <li data-step="live">
-        <span class="step-ic">④</span>
+        <span class="step-num">4</span>
         <div><div class="step-t">Bots live</div>
-        <div class="step-d" id="live-d">both bots running</div></div>
+        <div class="step-d" id="live-d">start both from the Bots page when ready</div></div>
       </li>
     </ol>
   </section>
@@ -37,23 +37,31 @@
   <!-- RIGHT: actions -->
   <div class="setup-right">
 
+    <!-- Channels quick link -->
+    <section class="panel">
+      <div class="panel-head"><h2>Source channels</h2>
+        <a class="link" href="/channels">Manage</a></div>
+      <p class="muted">Add, rename, flag as Persian, or remove the channels the
+        bots monitor. Changes apply live — no restart needed.</p>
+    </section>
+
     <!-- Login console -->
     <section class="panel" id="login-panel">
       <div class="panel-head"><h2>Telegram login</h2>
-        <button class="btn small warn" id="reset-btn" onclick="resetLogin()">Reset</button>
+        <button class="btn small danger" id="reset-btn" onclick="resetLogin()">Reset</button>
       </div>
 
       <div id="login-form-area">
         <p class="muted" id="login-intro">
-          Log in with the Telegram account the bots will use to read source
-          channels. A code is sent to your Telegram app.
+          Sign in with the Telegram account the bots will use to read source
+          channels. Telegram sends a code to your app.
         </p>
 
         <div class="field" id="phone-field">
-          <label>Phone (international, e.g. +98912...)</label>
+          <label>Phone (international format, e.g. +98912...)</label>
           <div class="inline">
             <input id="phone" placeholder="+98...">
-            <button class="btn ok" id="send-btn" onclick="sendPhone()">Send code</button>
+            <button class="btn primary" id="send-btn" onclick="sendPhone()">Send code</button>
           </div>
         </div>
 
@@ -61,7 +69,7 @@
           <label>Login code from Telegram</label>
           <div class="inline">
             <input id="code" placeholder="12345">
-            <button class="btn ok" onclick="sendCode()">Verify</button>
+            <button class="btn primary" onclick="sendCode()">Verify</button>
           </div>
         </div>
 
@@ -69,26 +77,16 @@
           <label>Two-step verification password</label>
           <div class="inline">
             <input id="tpass" type="password" placeholder="account password">
-            <button class="btn ok" onclick="sendPass()">Unlock</button>
+            <button class="btn primary" onclick="sendPass()">Unlock</button>
           </div>
         </div>
 
         <div class="done-box hidden" id="done-box">
-          ✅ Logged in. Session <code>forwarder_user.session</code> created.
+          Signed in. Session <code>forwarder_user.session</code> created.
         </div>
 
         <div class="err-box hidden" id="login-err"></div>
       </div>
-    </section>
-
-    <!-- Config editor -->
-    <section class="panel">
-      <div class="panel-head"><h2>Source channels</h2></div>
-      <p class="muted">One @channel per line. Saved to config.py → SOURCE_CHANNELS.</p>
-      <textarea id="channels" class="channels" rows="8">{% for c in cfg.SOURCE_CHANNELS %}{{ c }}
-{% endfor %}</textarea>
-      <button class="btn" onclick="saveChannels()">Save channels</button>
-      <span class="hint" id="chan-hint"></span>
     </section>
 
     <section class="panel">
@@ -99,7 +97,7 @@
         <div><label>BALE_BOT_TOKEN</label><input id="f_BALE_BOT_TOKEN" value="{{ cfg.BALE_BOT_TOKEN or '' }}"></div>
         <div><label>BALE_TARGET_CHANNEL</label><input id="f_BALE_TARGET_CHANNEL" value="{{ cfg.BALE_TARGET_CHANNEL or '' }}"></div>
       </div>
-      <button class="btn" onclick="saveFields()">Save tokens</button>
+      <button class="btn primary" onclick="saveFields()">Save tokens</button>
       <span class="hint" id="tok-hint"></span>
     </section>
 
@@ -107,10 +105,10 @@
     <section class="panel">
       <div class="panel-head"><h2>Bale downloader session</h2></div>
       <p class="muted">
-        bale_bot needs <code>forwarder_bale_dl.session</code>. After Telegram
-        login, generate it from the same account — no extra code required.
+        bale_bot needs <code>forwarder_bale_dl.session</code>. Once Telegram
+        login is done, create it from the same account — no extra code needed.
       </p>
-      <button class="btn ok" id="makebale-btn" onclick="makeBale()">Create forwarder_bale_dl.session</button>
+      <button class="btn primary" id="makebale-btn" onclick="makeBale()">Create forwarder_bale_dl.session</button>
       <span class="hint" id="bale-hint"></span>
     </section>
 
@@ -118,19 +116,21 @@
     <section class="panel">
       <div class="panel-head">
         <h2>AI news filter</h2>
-        <label class="switch">
+        <label class="toggle">
           <input type="checkbox" id="ai-toggle" onchange="toggleAI()">
-          <span id="ai-toggle-label">off</span>
+          <span class="track"></span>
+          <span id="ai-toggle-label">Off</span>
         </label>
       </div>
-      <p class="muted">An LLM gate drops useless news (ads, "follow us" promos)
-        and de-duplicates repeats before they reach Telegram or Bale.</p>
-      <p class="muted" style="margin-top:6px">
-        <label class="switch" style="cursor:default">
+      <p class="muted">An LLM gate drops ads and "follow us" promos and
+        de-duplicates repeats before they reach Telegram or Bale.</p>
+      <p class="muted" style="margin-top:10px;display:flex;align-items:center;gap:10px">
+        <label class="toggle">
           <input type="checkbox" id="media-toggle" onchange="toggleMedia()">
-          <span id="media-toggle-label">off</span>
+          <span class="track"></span>
+          <span id="media-toggle-label">Off</span>
         </label>
-        &nbsp;Drop photos / videos / albums / files with no caption
+        Drop photos, videos, albums and files with no caption
       </p>
       <div class="kv-edit">
         <div><label>Base URL</label><input id="ai_base" placeholder="http://…/v1"></div>
@@ -139,8 +139,8 @@
         <div><label>Dedup window (sec)</label><input id="ai_ttl" placeholder="86400"></div>
       </div>
       <div class="actions-row">
-        <button class="btn" onclick="saveAI()">Save AI settings</button>
-        <button class="btn small warn" onclick="resetAIStats()">Reset stats</button>
+        <button class="btn primary" onclick="saveAI()">Save AI settings</button>
+        <button class="btn small danger" onclick="resetAIStats()">Reset stats</button>
         <span class="hint" id="ai-hint"></span>
       </div>
       <div class="ai-mini" id="ai-mini"></div>
@@ -161,7 +161,7 @@ async function refreshLogin(){
   markStep('creds', d.config.api_id ? 'done' : 'todo', d.config.api_id ? 'API credentials present' : 'missing in config.py');
   markStep('login', d.done ? 'done' : (d.step==='idle'?'todo':'active'), d.done ? 'forwarder_user.session created' : (d.step!=='idle'?'in progress':'not started'));
   markStep('baledl', d.config.bale_dl ? 'done' : 'todo', d.config.bale_dl ? 'forwarder_bale_dl.session present' : 'not created');
-  markStep('live', (d.config.tg_user && d.config.bale_dl) ? 'todo' : 'todo', 'start bots from Bots page when ready');
+  markStep('live', (d.config.tg_user && d.config.bale_dl) ? 'todo' : 'todo', 'start bots from the Bots page when ready');
 
   if (d.error) err(d.error);  // never auto-clear here; handlers clear on new attempt
 
@@ -211,14 +211,8 @@ async function makeBale(){
   btn.disabled = true; btn.textContent = 'Creating…';
   const d = await fetch('/api/login/makebale', {method:'POST'}).then(r=>r.json());
   btn.disabled = false; btn.textContent = 'Create forwarder_bale_dl.session';
-  document.getElementById('bale-hint').textContent = d.ok ? '✅ created' : ('❌ ' + (d.error||'failed'));
+  document.getElementById('bale-hint').textContent = d.ok ? 'Created.' : ('Failed: ' + (d.error||'unknown error'));
   await refreshLogin();
-}
-
-async function saveChannels(){
-  const txt = document.getElementById('channels').value;
-  const d = await fetch('/api/config/channels', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'channels='+encodeURIComponent(txt)}).then(r=>r.json());
-  document.getElementById('chan-hint').textContent = d.ok ? ('✅ '+d.channels.length+' channels saved') : ('❌ '+d.error);
 }
 
 async function refreshAI(){
@@ -226,27 +220,27 @@ async function refreshAI(){
   const s = d.settings || {};
   const ai = document.getElementById('ai-toggle');
   ai.checked = !!s.enabled;
-  document.getElementById('ai-toggle-label').textContent = s.enabled ? 'active' : 'off';
+  document.getElementById('ai-toggle-label').textContent = s.enabled ? 'Active' : 'Off';
   const m = document.getElementById('media-toggle');
   m.checked = !!s.media_gate;
-  document.getElementById('media-toggle-label').textContent = s.media_gate ? 'on' : 'off';
+  document.getElementById('media-toggle-label').textContent = s.media_gate ? 'On' : 'Off';
   document.getElementById('ai_base').value = s.base_url || '';
   document.getElementById('ai_model').value = s.model || '';
   if (s.api_key_masked) document.getElementById('ai_key').placeholder = s.api_key_masked;
   document.getElementById('ai_ttl').value = s.dedup_ttl_seconds || '';
   const st = d.stats || {};
   document.getElementById('ai-mini').textContent =
-    `checked ${st.checked||0} · relayed ${st.relayed||0} · useless ${st.dropped_useless||0} · dup ${st.dropped_dup||0} · no-caption ${st.dropped_media||0} · errors ${st.errors||0}`;
+    `checked ${st.checked||0} · relayed ${st.relayed||0} · not news ${st.dropped_useless||0} · duplicate ${st.dropped_dup||0} · no caption ${st.dropped_media||0} · errors ${st.errors||0}`;
 }
 async function toggleAI(){
   const on = document.getElementById('ai-toggle').checked;
   const d = await fetch('/api/ai/toggle', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'enabled='+(on?'true':'false')}).then(r=>r.json());
-  document.getElementById('ai-toggle-label').textContent = d.enabled ? 'active' : 'off';
+  document.getElementById('ai-toggle-label').textContent = d.enabled ? 'Active' : 'Off';
 }
 async function toggleMedia(){
   const on = document.getElementById('media-toggle').checked;
   const d = await fetch('/api/ai/media/toggle', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'enabled='+(on?'true':'false')}).then(r=>r.json());
-  document.getElementById('media-toggle-label').textContent = d.media_gate ? 'on' : 'off';
+  document.getElementById('media-toggle-label').textContent = d.media_gate ? 'On' : 'Off';
 }
 async function saveAI(){
   const b = document.getElementById('ai_base').value;
@@ -255,7 +249,7 @@ async function saveAI(){
   const t = document.getElementById('ai_ttl').value;
   const d = await fetch('/api/ai/save', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body:'base_url='+encodeURIComponent(b)+'&model='+encodeURIComponent(m)+'&api_key='+encodeURIComponent(k)+'&dedup_ttl_seconds='+encodeURIComponent(t)}).then(r=>r.json());
-  document.getElementById('ai-hint').textContent = d.ok ? '✅ saved (bots reload live)' : ('❌ '+d.error);
+  document.getElementById('ai-hint').textContent = d.ok ? 'Saved — bots reload live.' : ('Failed: ' + d.error);
   await refreshAI();
 }
 async function resetAIStats(){
@@ -268,7 +262,7 @@ async function saveFields(){
     const v = document.getElementById('f_'+k).value;
     await fetch('/api/config/field', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'key='+k+'&value='+encodeURIComponent(v)});
   }
-  document.getElementById('tok-hint').textContent = '✅ saved (restart bots to apply)';
+  document.getElementById('tok-hint').textContent = 'Saved — restart bots to apply.';
 }
 
 refreshLogin();

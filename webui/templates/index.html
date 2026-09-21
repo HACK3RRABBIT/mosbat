@@ -1,92 +1,88 @@
 {% extends "base.html" %}
 {% block title %}Dashboard{% endblock %}
 {% set active = 'home' %}
-{% block crumb %}Dashboard{% endblock %}
+{% block mast_status %}<span class="dot"></span><span id="mast-status-text">reading the wire…</span>{% endblock %}
 {% block h1 %}Dashboard{% endblock %}
 
-{% block topbar_right %}
-  <div class="master-pill">
-    Supervisor
-    <span class="pill {{ 'ok' if master_running else 'bad' }}" id="mstate">{{ 'ONLINE' if master_running else 'OFFLINE' }}</span>
-  </div>
-{% endblock %}
-
 {% block content %}
-<section class="metrics">
-  <div class="tile">
-    <div class="tile-label">CPU</div>
-    <div class="tile-val" id="cpu">{{ host.cpu_percent }}%</div>
-    <div class="bar"><i id="cpu-bar" style="width:{{ host.cpu_percent }}%"></i></div>
+<section class="hero">
+  <div>
+    <div class="hero-headline" id="hero-headline">Reading the wire…</div>
+    <div class="hero-sub" id="hero-sub">&nbsp;</div>
   </div>
-  <div class="tile">
-    <div class="tile-label">Memory</div>
-    <div class="tile-val" id="mem">{{ host.mem_percent }}%</div>
-    <div class="tile-sub">{{ host.mem_used_mb }} / {{ host.mem_total_mb }} MB</div>
-    <div class="bar"><i id="mem-bar" style="width:{{ host.mem_percent }}%"></i></div>
-  </div>
-  <div class="tile">
-    <div class="tile-label">Disk /</div>
-    <div class="tile-val" id="disk">{{ host.disk_percent }}%</div>
-    <div class="bar"><i id="disk-bar" style="width:{{ host.disk_percent }}%"></i></div>
-  </div>
-  <div class="tile">
-    <div class="tile-label">Queue</div>
-    <div class="tile-val" id="q">{{ queue.pending_lines }}</div>
-    <div class="tile-sub">pending lines</div>
-  </div>
-  <div class="tile">
-    <div class="tile-label">Load avg</div>
-    <div class="tile-val sm" id="load">{{ host.load_avg[0] }} · {{ host.load_avg[1] }} · {{ host.load_avg[2] }}</div>
-  </div>
-  <div class="tile">
-    <div class="tile-label">Uptime</div>
-    <div class="tile-val sm" id="up">{{ host.boot_secs // 3600 }}h {{ (host.boot_secs % 3600)//60 }}m</div>
-    <div class="tile-sub">{{ host.hostname }}</div>
+  <div class="hero-radar" id="hero-radar">
+    <div class="ring"></div><div class="ring"></div><div class="ring"></div>
+    <div class="core"></div>
   </div>
 </section>
 
-<section class="panel">
-  <div class="panel-head">
-    <h2>Bots</h2>
-    <a class="link" href="/bots">Manage →</a>
+<section class="ticker">
+  <div class="ticker-item">
+    <div class="ticker-label">CPU</div>
+    <div class="ticker-value" id="cpu">{{ host.cpu_percent }}%</div>
+    <div class="meter"><i id="cpu-bar" style="width:{{ host.cpu_percent }}%"></i></div>
   </div>
-  <div class="bot-grid">
-    {% for b in bots %}
-    <div class="bot-card" id="bot-{{ b.name }}">
-      <div class="bot-top">
-        <span class="bot-name">{{ b.name }}.py</span>
-        <span class="pill" id="pill-{{ b.name }}">…</span>
-      </div>
-      <div class="bot-meta">
-        <span>PID <code id="pid-{{ b.name }}">{{ b.pid or '—' }}</code></span>
-        <span id="st-{{ b.name }}">{{ 'running' if b.running else ('needs login' if b.needs_login else 'stopped') }}</span>
-      </div>
-      <pre class="mini-log" id="log-{{ b.name }}">{{ b.last_log or '—' }}</pre>
-    </div>
-    {% endfor %}
+  <div class="ticker-item">
+    <div class="ticker-label">Memory</div>
+    <div class="ticker-value" id="mem">{{ host.mem_percent }}%</div>
+    <div class="meter"><i id="mem-bar" style="width:{{ host.mem_percent }}%"></i></div>
+  </div>
+  <div class="ticker-item">
+    <div class="ticker-label">Disk</div>
+    <div class="ticker-value" id="disk">{{ host.disk_percent }}%</div>
+    <div class="meter"><i id="disk-bar" style="width:{{ host.disk_percent }}%"></i></div>
+  </div>
+  <div class="ticker-item">
+    <div class="ticker-label">Queued</div>
+    <div class="ticker-value" id="q">{{ queue.pending_lines }}</div>
+  </div>
+  <div class="ticker-item">
+    <div class="ticker-label">Load avg</div>
+    <div class="ticker-value" id="load" style="font-size:15px">{{ host.load_avg[0] }} · {{ host.load_avg[1] }} · {{ host.load_avg[2] }}</div>
+  </div>
+  <div class="ticker-item">
+    <div class="ticker-label">Uptime · {{ host.hostname }}</div>
+    <div class="ticker-value" id="up" style="font-size:15px">{{ host.boot_secs // 3600 }}h {{ (host.boot_secs % 3600)//60 }}m</div>
   </div>
 </section>
 
+<div class="section-head">
+  <h2>Desks</h2>
+  <a class="link" href="/bots">Manage</a>
+</div>
+<section class="desk-grid">
+  {% for b in bots %}
+  <div class="desk" id="bot-{{ b.name }}">
+    <div class="desk-top">
+      <span class="desk-name">{{ b.name }}</span>
+      <span class="status" id="pill-{{ b.name }}"><span class="dot"></span><span>…</span></span>
+    </div>
+    <div class="desk-meta">
+      <span>PID <code id="pid-{{ b.name }}">{{ b.pid or '—' }}</code></span>
+    </div>
+    <pre class="desk-log" id="log-{{ b.name }}">{{ b.last_log or 'No output yet.' }}</pre>
+  </div>
+  {% endfor %}
+</section>
+
+<div class="section-head">
+  <h2>AI gate</h2>
+  <a class="link" href="/setup">Settings</a>
+</div>
 <section class="panel">
-  <div class="panel-head">
-    <h2>AI News Filter</h2>
-    <a class="link" href="/setup">Settings →</a>
+  <div class="gate-live">
+    <span class="status" id="ai-state"><span class="dot"></span><span>…</span></span>
+    <span class="gate-model" id="ai-model"></span>
   </div>
-  <div class="ai-grid">
-    <div class="ai-state">
-      <span class="pill" id="ai-state">…</span>
-      <span class="ai-model" id="ai-model"></span>
-    </div>
-    <div class="ai-stats">
-      <div class="ai-stat"><b id="ai-checked">0</b><span>Checked</span></div>
-      <div class="ai-stat ok"><b id="ai-relayed">0</b><span>Relayed</span></div>
-      <div class="ai-stat warn"><b id="ai-useless">0</b><span>Useless</span></div>
-      <div class="ai-stat warn"><b id="ai-dup">0</b><span>Duplicate</span></div>
-      <div class="ai-stat warn"><b id="ai-media">0</b><span>No-caption</span></div>
-      <div class="ai-stat bad"><b id="ai-err">0</b><span>Errors</span></div>
-    </div>
-    <div class="ai-freshness" id="ai-freshness">last news: —</div>
+  <div class="ticker">
+    <div class="ticker-item"><div class="ticker-label">Checked</div><div class="ticker-value" id="ai-checked">0</div></div>
+    <div class="ticker-item"><div class="ticker-label">Relayed</div><div class="ticker-value ok" id="ai-relayed">0</div></div>
+    <div class="ticker-item"><div class="ticker-label">Not news</div><div class="ticker-value warn" id="ai-useless">0</div></div>
+    <div class="ticker-item"><div class="ticker-label">Duplicate</div><div class="ticker-value warn" id="ai-dup">0</div></div>
+    <div class="ticker-item"><div class="ticker-label">No caption</div><div class="ticker-value warn" id="ai-media">0</div></div>
+    <div class="ticker-item"><div class="ticker-label">Errors</div><div class="ticker-value bad" id="ai-err">0</div></div>
   </div>
+  <div class="gate-freshness" id="ai-freshness">last news: —</div>
 </section>
 {% endblock %}
 
@@ -96,31 +92,45 @@ async function refresh() {
   const r = await fetch('/api/status');
   if (!r.ok) { location.href = '/login'; return; }
   const d = await r.json();
-  set('mstate', d.master_running ? 'ONLINE' : 'OFFLINE');
-  document.getElementById('mstate').className = 'pill ' + (d.master_running ? 'ok' : 'bad');
+
+  const running = d.bots.filter(b => b.running).length;
+  const open = d.master_running && running === d.bots.length && d.bots.length > 0;
+  const some = d.master_running && running > 0 && !open;
+  document.getElementById('hero-headline').textContent =
+    open ? 'The wire is open' : some ? 'The wire is partly open' : 'The wire is quiet';
+  document.getElementById('hero-sub').textContent =
+    `${running}/${d.bots.length} bots running · ${d.queue.pending_lines} queued` +
+    (d.ai && d.ai.stats && d.ai.stats.last_relayed ? ' · last relay ' + fmtAgo(Math.floor(Date.now()/1000) - d.ai.stats.last_relayed) : '');
+  const radar = document.getElementById('hero-radar');
+  radar.className = 'hero-radar ' + (open ? 'live' : some ? 'live' : 'down');
+  set('mast-status-text', open ? 'Wire open' : some ? 'Wire partly open' : 'Wire quiet');
+  document.getElementById('mast-status').className = 'status ' + (open || some ? 'ok live' : 'bad');
+
   set('cpu', d.host.cpu_percent + '%'); bar('cpu-bar', d.host.cpu_percent);
   set('mem', d.host.mem_percent + '%'); bar('mem-bar', d.host.mem_percent);
   set('disk', d.host.disk_percent + '%'); bar('disk-bar', d.host.disk_percent);
   set('q', d.queue.pending_lines);
   set('load', d.host.load_avg.join(' · '));
   set('up', Math.floor(d.host.boot_secs/3600) + 'h ' + Math.floor((d.host.boot_secs%3600)/60) + 'm');
+
   for (const b of d.bots) {
     set('pid-' + b.name, b.pid || '—');
     const pill = document.getElementById('pill-' + b.name);
     let label, cls;
-    if (b.needs_login) { label = 'NEEDS LOGIN'; cls = 'warn'; }
-    else if (b.running) { label = 'RUNNING'; cls = 'ok'; }
-    else { label = 'STOPPED'; cls = 'bad'; }
-    pill.textContent = label; pill.className = 'pill ' + cls;
-    set('st-' + b.name, b.needs_login ? 'needs login' : (b.running ? 'running' : 'stopped'));
+    if (b.needs_login) { label = 'needs login'; cls = 'warn'; }
+    else if (b.running) { label = 'running'; cls = 'ok live'; }
+    else { label = 'stopped'; cls = 'bad'; }
+    pill.className = 'status ' + cls;
+    pill.querySelector('span:last-child').textContent = label;
     const log = document.getElementById('log-' + b.name);
     if (b.last_log) log.textContent = b.last_log;
   }
+
   if (d.ai) {
     const on = d.ai.settings && d.ai.settings.enabled;
     const sp = document.getElementById('ai-state');
-    sp.textContent = on ? 'ACTIVE' : 'OFF';
-    sp.className = 'pill ' + (on ? 'ok' : 'bad');
+    sp.className = 'status ' + (on ? 'ok' : 'bad');
+    sp.querySelector('span:last-child').textContent = on ? 'active' : 'off';
     set('ai-model', d.ai.settings ? (d.ai.settings.model || '') : '');
     const s = d.ai.stats || {};
     set('ai-checked', s.checked || 0);
@@ -137,11 +147,10 @@ async function refresh() {
     if (recv) {
       const mins = Math.floor((now - recv)/60);
       txt += (mins<=1 ? 'just now' : (mins + 'm ago'));
-      if (mins > 8) fr.className = 'ai-freshness stale';
-      else fr.className = 'ai-freshness';
+      fr.className = mins > 8 ? 'gate-freshness stale' : 'gate-freshness';
     } else {
       txt += '—';
-      fr.className = 'ai-freshness';
+      fr.className = 'gate-freshness muted';
     }
     fr.textContent = txt + (rel ? '  ·  last relayed ' + fmtAgo(now - rel) : '');
   }

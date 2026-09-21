@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}Channels{% endblock %}
+{% set active = 'channels' %}
+{% block mast_status %}<span class="dot"></span><span>&nbsp;</span>{% endblock %}
+{% block h1 %}Source channels{% endblock %}
+
+{% block topbar_right %}
+<span class="hint" id="chan-count">{{ channels|length }} channel{{ '' if channels|length == 1 else 's' }}</span>
+{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="panel-head"><h2>Add a source</h2></div>
+  <form id="add-form" class="channel-form">
+    <input id="add-handle" placeholder="@channelname" autocomplete="off">
+    <input id="add-name" placeholder="Display name (e.g. ایرنا)" autocomplete="off">
+    <label class="toggle">
+      <input type="checkbox" id="add-persian">
+      <span class="track"></span>
+      <span id="add-persian-label">Persian source</span>
+    </label>
+    <button class="btn primary" type="submit">Add channel</button>
+  </form>
+  <div class="err-box hidden" id="add-err"></div>
+</section>
+
+<div class="section-head">
+  <h2>On the wire</h2>
+  <span class="muted">Live — the desk picks up changes within 20 seconds, no restart needed</span>
+</div>
+<section class="roster" id="channel-list"></section>
+<p class="muted hidden" id="empty-note" style="margin-top:14px">No sources yet — add one above to start relaying.</p>
+<div id="toast" class="toast hidden"></div>
+{% endblock %}
+
+{% block script %}
+<script>
+let CHANNELS = {{ channels | tojson }};
+
+function esc(s){ const d=document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
+
+function render() {
+  const list = document.getElementById('channel-list');
+  document.getElementById('chan-count').textContent = CHANNELS.length + (CHANNELS.length === 1 ? ' channel' : ' channels');
+  document.getElementById('empty-note').classList.toggle('hidden', CHANNELS.length > 0);
+  list.classList.toggle('hidden', CHANNELS.length === 0);
+  list.innerHTML = CHANNELS.map(c => `
+    <div class="roster-row" data-handle="${esc(c.handle)}">
+      <div class="roster-main">
+        <span class="tag ${c.persian ? 'fa' : 'intl'}">${c.persian ? 'FA' : 'INT'}</span>
+        <div>
+          <div class="roster-handle">${esc(c.handle)}</div>
+          <div class="roster-name fa muted">${esc(c.name) || 'No display name'}</div>
+        </div>
+      </div>
+      <div class="roster-actions">
+        <button class="btn small" onclick="startEdit('${esc(c.handle)}')">Edit</button>
+        <button class="btn small danger" onclick="confirmRemove('${esc(c.handle)}')">Remove</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function confirmRemove(handle) {
+  const row = document.querySelector(`.roster-row[data-handle="${CSS.escape(handle)}"]`);
+  row.innerHTML = `
+    <div class="roster-confirm">
+      <span>Remove <span class="roster-handle">${esc(handle)}</span> from the wire?</span>
+      <div class="roster-actions">
+        <button class="btn danger small" onclick="removeChannel('${esc(handle)}')">Remove</button>
+        <button class="btn small" onclick="render()">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function startEdit(handle) {
+  const c = CHANNELS.find(x => x.handle === handle);
+  if (!c) return;
+  const row = document.querySelector(`.roster-row[data-handle="${CSS.escape(handle)}"]`);
+  row.innerHTML = `
+    <div class="roster-edit">
+      <span class="roster-handle">${esc(handle)}</span>
+      <input class="edit-name" value="${esc(c.name)}" placeholder="Display name">
+      <label class="toggle">
+        <input type="checkbox" class="edit-persian" ${c.persian ? 'checked' : ''}>
+        <span class="track"></span>
+        <span>Persian source</span>
+      </label>
+      <button class="btn primary small" onclick="saveEdit('${esc(handle)}')">Save</button>
+      <button class="btn small" onclick="render()">Cancel</button>
+    </div>`;
+}
+
+let _toastTimer = null;
+function toast(msg, kind) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (kind || 'ok');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => t.classList.add('hidden'), 3200);
+}
+
+async function saveEdit(handle) {
+  const row = document.querySelector(`.roster-row[data-handle="${CSS.escape(handle)}"]`);
+  const name = row.querySelector('.edit-name').value.trim();
+  const persian = row.querySelector('.edit-persian').checked;
+  const d = await post('/api/channels/edit', {handle, name, persian: persian ? 'true' : 'false'});
+  if (d.ok) { CHANNELS = d.channels; render(); toast(`Saved ${handle}`); }
+  else toast(d.error || 'Could not save', 'bad');
+}
+
+async function removeChannel(handle) {
+  const d = await post('/api/channels/remove', {handle});
+  if (d.ok) { CHANNELS = d.channels; render(); toast(`Removed ${handle}`); }
+  else toast(d.error || 'Could not remove', 'bad');
+}
+
+async function post(url, fields) {
+  const body = new URLSearchParams(fields).toString();
+  const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body});
+  return r.json();
+}
+
+document.getElementById('add-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errBox = document.getElementById('add-err');
+  errBox.classList.add('hidden');
+  const handle = document.getElementById('add-handle').value.trim();
+  const name = document.getElementById('add-name').value.trim();
+  const persian = document.getElementById('add-persian').checked;
+  if (!handle) { errBox.textContent = 'Enter a channel handle, e.g. @irna_1313'; errBox.classList.remove('hidden'); return; }
+  const d = await post('/api/channels/add', {handle, name, persian: persian ? 'true' : 'false'});
+  if (d.ok) {
+    CHANNELS = d.channels; render();
+    toast(`Added ${handle}`);
+    document.getElementById('add-handle').value = '';
+    document.getElementById('add-name').value = '';
+    document.getElementById('add-persian').checked = false;
+  } else {
+    errBox.textContent = d.error || 'Could not add that channel';
+    errBox.classList.remove('hidden');
+  }
+});
+
+render();
+</script>
+{% endblock %}

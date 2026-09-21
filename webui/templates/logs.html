@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Logs{% endblock %}
 {% set active = 'logs' %}
-{% block crumb %}Logs{% endblock %}
-{% block h1 %}Live logs{% endblock %}
+{% block mast_status %}<span class="dot"></span><span id="mast-status-text">&nbsp;</span>{% endblock %}
+{% block h1 %}Logs{% endblock %}
 
 {% block topbar_right %}
-  <label class="follow"><input type="checkbox" id="follow" checked> follow</label>
-  <button class="btn small" onclick="scrollBottom()">↓ bottom</button>
+  <label class="follow"><input type="checkbox" id="follow" checked> Follow</label>
+  <button class="btn small" onclick="scrollBottom()">Jump to latest</button>
 {% endblock %}
 
 {% block content %}
@@ -40,16 +40,15 @@ async function stream() {
 }
 stream();
 
-// also reflect side nav state
-async function navState(){
+async function navMast(){
   try{
     const d = await fetch('/api/status').then(r=>r.ok?r.json():null);
     if(!d) return;
-    const dot=document.getElementById('nav-dot'), lbl=document.getElementById('nav-state');
-    dot.className='dot '+(d.master_running?'ok':'bad');
-    lbl.textContent=d.master_running?'Supervisor online':'Supervisor off';
+    const running = d.bots.filter(b => b.running).length;
+    document.getElementById('mast-status').className = 'status ' + (running > 0 ? 'ok live' : 'bad');
+    document.getElementById('mast-status-text').textContent = d.master_running ? (running + '/' + d.bots.length + ' running') : 'supervisor off';
   }catch(e){}
 }
-navState(); setInterval(navState,4000);
+navMast(); setInterval(navMast, 4000);
 </script>
 {% endblock %}
