@@ -49,7 +49,7 @@ bot     = TelegramClient("forwarder_bot",  API_ID, API_HASH)
 # telemetry from a previous run (so it can't think intake is frozen at boot).
 _BOT_STARTED_AT = _time.time()
 
-mode             = "manual"
+mode             = "auto"    # default: relay automatically; /mode switches to manual approval
 tg_publish       = True   # True = send to Telegram channel, False = skip
 tg_active        = True   # False = completely silent (no approvals, no TG posts), queue still written for Bale
 pending          = {}
@@ -74,7 +74,7 @@ _channels_mtime  = -1.0
 QUEUE_FILE      = "/tmp/feeder_queue.jsonl"
 MAX_QUEUE_LINES = 200
 CHANNELS_FILE   = "/tmp/feeder_channels.json"  # shared with bale_bot
-STATE_FILE      = "/tmp/feeder_tg_state.json"
+STATE_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tg_state.json")  # survives reboots
 _queue_write_count = 0
 QUEUE_TRIM_EVERY   = 20  # only re-read+trim the queue file every N writes
 
@@ -135,19 +135,20 @@ def _is_main_admin(event) -> bool:
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump({"tg_active": tg_active, "tg_publish": tg_publish}, f)
+            json.dump({"tg_active": tg_active, "tg_publish": tg_publish, "mode": mode}, f)
     except Exception as e:
         log.warning("save_state failed: %s", e)
 
 def load_state():
-    global tg_active, tg_publish
+    global tg_active, tg_publish, mode
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE) as f:
                 data = json.load(f)
             tg_active  = data.get("tg_active", True)
             tg_publish = data.get("tg_publish", True)
-            log.info("State loaded: tg_active=%s tg_publish=%s", tg_active, tg_publish)
+            mode       = data.get("mode", "auto")
+            log.info("State loaded: tg_active=%s tg_publish=%s mode=%s", tg_active, tg_publish, mode)
         except Exception as e:
             log.warning("load_state failed: %s", e)
 
@@ -793,10 +794,12 @@ async def on_button(event):
     try:
         if data == "set_auto":
             mode = "auto"
+            save_state()
             await event.edit("✅ **🤖 Auto** mode", parse_mode="markdown")
 
         elif data == "set_manual":
             mode = "manual"
+            save_state()
             await event.edit("✅ **👤 Manual** mode", parse_mode="markdown")
 
         elif data.startswith("edit_"):
@@ -1014,7 +1017,7 @@ async def main():
     log.info("Userbot logged in.")
     await sync_channel_ids()
     await bot.start(bot_token=BOT_TOKEN)
-    log.info("Telegram bot started. tg_active=%s tg_publish=%s", tg_active, tg_publish)
+    log.info("Telegram bot started. tg_active=%s tg_publish=%s mode=%s", tg_active, tg_publish, mode)
     await ensure_channels_joined()  # needs `bot` started to prompt the admin
     await asyncio.gather(
         userbot.run_until_disconnected(),

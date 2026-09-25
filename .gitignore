@@ -18,3 +18,4 @@ admins.json
 .judge-downloads/
 .venv-judge/
 dataset/
+tg_state.json
