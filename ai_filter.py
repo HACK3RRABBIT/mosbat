@@ -48,6 +48,9 @@ STATS_FILE = os.path.join(PROJ, "ai_stats.json")
 DATASET_DIR = os.path.join(PROJ, "dataset")
 DECISIONS_FILE = os.path.join(DATASET_DIR, "decisions.jsonl")
 LABELS_FILE = os.path.join(DATASET_DIR, "labels.jsonl")
+# Non-Jev outcomes (dropped before Jev saw it, or Jev unreachable) — for reports,
+# and to later check whether the link rule is dropping real news.
+EVENTS_FILE = os.path.join(DATASET_DIR, "events.jsonl")
 
 _lock = threading.Lock()
 _settings: dict = {}
@@ -72,6 +75,7 @@ def load_settings() -> dict:
         "dedup_threshold": 0.72,        # Noul probability above which we call it a dup
         "decide_timeout_seconds": 30,
         "dataset_max_mb": 500,          # stop collecting (and warn) past this size
+        "notify_rejections": True,      # tell the main admin about every item Jev drops
         "media_gate": True,
         "media_gate_types": ["photo", "video", "album_photo", "album_video", "file"],
     }
@@ -287,7 +291,7 @@ def _append_dataset(path: str, record: dict):
     try:
         os.makedirs(DATASET_DIR, exist_ok=True)
         limit = get_settings().get("dataset_max_mb", 500) * 1024 * 1024
-        used = sum(os.path.getsize(f) for f in (DECISIONS_FILE, LABELS_FILE) if os.path.exists(f))
+        used = sum(os.path.getsize(f) for f in (DECISIONS_FILE, LABELS_FILE, EVENTS_FILE) if os.path.exists(f))
         if used > limit:
             if not _dataset_full_warned:
                 log.warning("dataset/ reached %d MB cap — no longer collecting training data", used // 1048576)
@@ -297,6 +301,11 @@ def _append_dataset(path: str, record: dict):
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as e:
         log.warning("dataset write failed: %s", e)
+
+
+def record_event(kind: str, source: str = "", text: str = ""):
+    """kind: link | media | jev_error"""
+    _append_dataset(EVENTS_FILE, {"ts": time.time(), "kind": kind, "source": source, "text": text})
 
 
 def record_label(item_id, label: str, edited_text=None):
@@ -370,6 +379,7 @@ async def _decide_async(text: str, source: str = "") -> dict:
         with _lock:
             _stats["errors"] += 1
         log.warning("ai_filter TypeSafe error (fail-open): %s", e)
+        record_event("jev_error", source, text)
         return {"relay": True, "reason": f"TypeSafe error, relayed: {e}", "match": None,
                 "dropped": "error", "id": item_id}
 
@@ -392,7 +402,8 @@ async def _decide_async(text: str, source: str = "") -> dict:
         with _lock:
             _stats["dropped_useless"] += 1
         log.info("AI DROP (%s): src=%s", result["category"], source)
-        return {"relay": False, "reason": result["category"], "match": None, "dropped": "useless", "id": item_id}
+        return {"relay": False, "reason": result["category"], "match": None, "dropped": "useless",
+                "id": item_id, "category": result["category"], "confidence": result["confidence"]}
 
     if result["dup_index"] is not None:
         with _lock:
@@ -401,7 +412,8 @@ async def _decide_async(text: str, source: str = "") -> dict:
         log.info("AI DROP (duplicate, p=%.2f): src=%s matched=%s",
                  result["dup_prob"], source, matched[:80])
         return {"relay": False, "reason": f"duplicate (p={result['dup_prob']:.2f})",
-                 "match": matched, "dropped": "duplicate", "id": item_id}
+                 "match": matched, "dropped": "duplicate", "id": item_id,
+                 "category": result["category"], "dup_prob": result["dup_prob"]}
 
     _remember(text)
     with _lock:

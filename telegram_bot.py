@@ -22,11 +22,12 @@ from config import (
     SOURCE_CHANNELS, PERSIAN_CHANNELS, SOURCE_NAMES, TG_FOOTER,
 )
 from shared import (
-    translate, clean_text, has_link, detect_media_type, media_emoji,
+    translate, clean_text, detect_media_type, media_emoji,
     make_key, has_blockquote, extract_blockquote_and_rest,
     build_caption, build_quote_caption, get_doc_mime,
 )
 import ai_filter
+import reports
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -49,6 +50,7 @@ bot     = TelegramClient("forwarder_bot",  API_ID, API_HASH)
 # telemetry from a previous run (so it can't think intake is frozen at boot).
 _BOT_STARTED_AT = _time.time()
 
+last_report      = 0.0      # ts of the last 12h report slot sent
 mode             = "auto"    # default: relay automatically; /mode switches to manual approval
 tg_publish       = True   # True = send to Telegram channel, False = skip
 tg_active        = True   # False = completely silent (no approvals, no TG posts), queue still written for Bale
@@ -68,7 +70,8 @@ join_pending     = {}   # key -> channel handle, for the "join this channel?" Ye
 active_channels  = list(SOURCE_CHANNELS)
 active_persian   = set(PERSIAN_CHANNELS)
 active_names     = dict(SOURCE_NAMES)
-active_channel_ids = set()   # resolved Telethon entity ids for active_channels
+active_channel_ids = set()
+channel_handle_by_id = {}   # marked peer id -> @handle   # resolved Telethon entity ids for active_channels
 _channels_mtime  = -1.0
 
 QUEUE_FILE      = "/tmp/feeder_queue.jsonl"
@@ -135,12 +138,12 @@ def _is_main_admin(event) -> bool:
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump({"tg_active": tg_active, "tg_publish": tg_publish, "mode": mode}, f)
+            json.dump({"tg_active": tg_active, "tg_publish": tg_publish, "mode": mode, "last_report": last_report}, f)
     except Exception as e:
         log.warning("save_state failed: %s", e)
 
 def load_state():
-    global tg_active, tg_publish, mode
+    global tg_active, tg_publish, mode, last_report
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE) as f:
@@ -148,6 +151,7 @@ def load_state():
             tg_active  = data.get("tg_active", True)
             tg_publish = data.get("tg_publish", True)
             mode       = data.get("mode", "auto")
+            last_report = data.get("last_report", 0.0)
             log.info("State loaded: tg_active=%s tg_publish=%s mode=%s", tg_active, tg_publish, mode)
         except Exception as e:
             log.warning("load_state failed: %s", e)
@@ -272,6 +276,8 @@ async def sync_channel_ids():
     if dirty:
         _save_channel_id_cache(cache)
     active_channel_ids = resolved
+    channel_handle_by_id.clear()
+    channel_handle_by_id.update({v: h for h, v in cache.items() if v in resolved})
     log.info("Resolved %d/%d source channels to live entity ids (%d from cache, %d freshly resolved)",
               len(resolved), len(active_channels), from_cache, len(resolved) - from_cache)
 
@@ -543,9 +549,16 @@ async def process_msgs(msgs, source_username=""):
     # relayed). Pure syntactic check — no LLM call.
     mtype = entry.get("type", "text")
     judge_text = entry.get("raw_text") or entry.get("caption") or ""
+    if mtype == "text" and not (entry.get("raw_text") or "").strip():
+        # Nothing left to publish (e.g. a link-only post once clean_text strips the
+        # URL). Posts with links are otherwise judged by Jev like everything else.
+        log.info("Dropped empty text post from %s", source_username)
+        ai_filter.record_event("empty", source_username, "")
+        return
     dropped, reason = ai_filter.media_gate_check(mtype, judge_text)
     if dropped:
         log.info("Media gate dropped %s from %s (no caption)", mtype, source_username)
+        ai_filter.record_event("media", source_username, "")
         for f in entry.get("files", []):
             f["data"] = b""
         return
@@ -559,6 +572,8 @@ async def process_msgs(msgs, source_username=""):
         decision = await ai_filter.decide(judge_text, source_username)
         entry["judge_id"] = decision.get("id")  # links the admin's approve/reject to the dataset record
         if not decision["relay"]:
+            if decision["dropped"] in ("useless", "duplicate"):
+                await notify_rejection(source_username, judge_text, decision)
             log.info("AI filter dropped %s: %s — %s",
                      decision["dropped"], source_username, decision["reason"])
             # free media bytes, do not queue
@@ -635,6 +650,7 @@ async def cmd_start(event):
         f"TG bot: **{active}** | Mode: **{label}** | TG publish: **{pub}**\n\n"
         f"/mode — switch Auto/Manual\n"
         f"/status — current status\n"
+        f"/report — Jev report for the last 12 hours\n"
         f"/tgstop — completely stop TG bot (Bale keeps running)\n"
         f"/tgstart — resume TG bot\n"
         f"/tgon — enable TG channel publish\n"
@@ -644,6 +660,55 @@ async def cmd_start(event):
         f"/removechannel — remove source channel",
         parse_mode="markdown"
     )
+
+async def notify_rejection(source_username, text, decision):
+    """Silently tell the main admin what Jev dropped and why."""
+    if not ai_filter.get_settings().get("notify_rejections", True):
+        return
+    _maybe_reload_admins()
+    name = active_names.get(source_username, source_username or "ناشناس")
+    try:
+        await bot.send_message(main_admin_id, reports.rejection_notice(name, text, decision),
+                               parse_mode="markdown", silent=True, link_preview=False)
+    except Exception as e:
+        log.warning("Could not send rejection notice: %s", e)
+
+
+async def send_report(since, until):
+    _maybe_reload_admins()
+    text = reports.build_report(since, until, active_names)
+    await bot.send_message(main_admin_id, text, parse_mode="markdown")
+
+
+async def report_task():
+    """Report at 08:00 and 20:00 local time. The last sent slot is persisted, so a
+    restart around a slot neither skips nor repeats it."""
+    global last_report
+    if not last_report:  # first run ever: start from now, don't backfill an empty window
+        last_report = reports.next_slot(_time.time() - 12 * 3600)
+        save_state()
+    while True:
+        now = _time.time()
+        prev = reports.next_slot(now - 12 * 3600)
+        if prev <= now and last_report < prev:   # a slot passed while we weren't sending
+            target = prev
+        else:
+            target = reports.next_slot(now)
+            await asyncio.sleep(max(1, target - now))
+        try:
+            await send_report(target - 12 * 3600, target)
+            log.info("12h report sent")
+        except Exception as e:
+            log.warning("12h report failed: %s", e)
+        last_report = target
+        save_state()
+
+
+@bot.on(events.NewMessage(func=_is_admin, pattern="/report"))
+async def cmd_report(event):
+    now = _time.time()
+    await event.respond(reports.build_report(now - 12 * 3600, now, active_names), parse_mode="markdown")
+
 
 @bot.on(events.NewMessage(func=_is_admin, pattern="/status"))
 async def cmd_status(event):
@@ -891,8 +956,6 @@ async def handle_album(grouped_id, source_username):
     if not msgs:
         return
     msgs.sort(key=lambda m: m.id)
-    if has_link(next((m.message for m in msgs if m.message), "")):
-        return
     await process_msgs(msgs, source_username=source_username)
 
 @userbot.on(events.NewMessage())
@@ -905,9 +968,6 @@ async def on_new_message(event):
     if event.chat_id not in active_channel_ids:
         return
     msg = event.message
-    if has_link(msg.message or ""):
-        log.info("Skipped message id=%s (link)", msg.id)
-        return
     ai_filter.mark_received()  # telemetry: intake loop is alive
     chat = await event.get_chat()
     src  = f"@{chat.username}" if getattr(chat, "username", None) else ""
@@ -1025,6 +1085,7 @@ async def main():
         cleanup_task(),
         intake_watchdog(),
         channels_reload_task(),
+        report_task(),
     )
 
 if __name__ == "__main__":
