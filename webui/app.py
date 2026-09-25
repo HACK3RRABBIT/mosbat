@@ -28,7 +28,7 @@ if _HERE not in sys.path:
 
 import asyncio
 from fastapi import FastAPI, Request, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
@@ -49,6 +49,7 @@ QUEUE_FILE = "/tmp/feeder_queue.jsonl"
 LOG_FILES = {"telegram": PROJ / "telegram_bot.log", "bale": PROJ / "bale_bot.log"}
 CONFIG_FILE = PROJ / "config.py"
 CHANNELS_FILE = Path("/tmp/feeder_channels.json")  # shared, live source of truth (see telegram_bot.py)
+ADMINS_FILE = PROJ / "admins.json"  # hot-reloaded by telegram_bot.py
 
 SECRET = os.environ.get("MOSBAT_WEBUI_PASS", "funlife")
 SESSION = {"authed": False}
@@ -69,6 +70,12 @@ def check_auth(request: Request):
         SESSION["authed"] = True
         return
     raise HTTPException(status_code=401, detail="unauthorized")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    # Browsers request /favicon.ico directly regardless of the <link> tag.
+    return FileResponse(WEBUI / "static" / "favicon.svg", media_type="image/svg+xml")
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -481,6 +488,90 @@ async def api_ai_save(request: Request,
 def api_config(request: Request):
     check_auth(request)
     return JSONResponse(read_config())
+
+
+# ── Admins (Telegram user ids allowed to use the bot) ──
+
+def read_admins() -> dict:
+    if ADMINS_FILE.exists():
+        try:
+            data = json.loads(ADMINS_FILE.read_text())
+            return {"admins": [int(x) for x in data.get("admins", [])],
+                    "main_admin": int(data.get("main_admin") or 0)}
+        except Exception:
+            pass
+    cfg = read_config()
+    admins = [int(x) for x in cfg.get("ADMIN_IDS", [])]
+    main = int(cfg.get("TG_MAIN_ADMIN") or 0)
+    if main and main not in admins:
+        admins.append(main)
+    return {"admins": admins, "main_admin": main}
+
+
+def write_admins(data: dict) -> None:
+    tmp = str(ADMINS_FILE) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, ADMINS_FILE)
+
+
+def _parse_user_id(raw: str) -> int:
+    raw = raw.strip()
+    if not raw.isdigit() or int(raw) <= 0:
+        raise ValueError("A Telegram user id is a positive number, e.g. 5421990837")
+    return int(raw)
+
+
+@app.get("/api/admins")
+def api_admins(request: Request):
+    check_auth(request)
+    return JSONResponse(read_admins())
+
+
+@app.post("/api/admins/add")
+async def api_admins_add(request: Request, user_id: str = Form(...)):
+    check_auth(request)
+    try:
+        uid = _parse_user_id(user_id)
+        d = read_admins()
+        if uid not in d["admins"]:
+            d["admins"].append(uid)
+        if not d["main_admin"]:
+            d["main_admin"] = uid
+        write_admins(d)
+        return JSONResponse({"ok": True, **d})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+@app.post("/api/admins/remove")
+async def api_admins_remove(request: Request, user_id: str = Form(...)):
+    check_auth(request)
+    try:
+        uid = _parse_user_id(user_id)
+        d = read_admins()
+        if uid == d["main_admin"]:
+            raise ValueError("Make someone else the main admin before removing this one")
+        d["admins"] = [a for a in d["admins"] if a != uid]
+        write_admins(d)
+        return JSONResponse({"ok": True, **d})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+@app.post("/api/admins/main")
+async def api_admins_main(request: Request, user_id: str = Form(...)):
+    check_auth(request)
+    try:
+        uid = _parse_user_id(user_id)
+        d = read_admins()
+        if uid not in d["admins"]:
+            raise ValueError("Add this id as an admin first")
+        d["main_admin"] = uid
+        write_admins(d)
+        return JSONResponse({"ok": True, **d})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
 
 def _norm_handle(raw: str) -> str:

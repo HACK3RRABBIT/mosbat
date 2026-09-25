@@ -45,6 +45,21 @@
         bots monitor. Changes apply live — no restart needed.</p>
     </section>
 
+    <!-- Admins -->
+    <section class="panel">
+      <div class="panel-head"><h2>Admins</h2></div>
+      <p class="muted">Telegram accounts that get approval requests and can use the
+        bot's commands. The main admin can also change channels and publishing.
+        Each new admin must send <code>/start</code> to the bot once — until then
+        Telegram won't let the bot message them.</p>
+      <form id="admin-form" class="channel-form" style="margin:14px 0">
+        <input id="admin-id" placeholder="Telegram user id, e.g. 5421990837" inputmode="numeric" autocomplete="off">
+        <button class="btn primary" type="submit">Add admin</button>
+      </form>
+      <div class="err-box hidden" id="admin-err"></div>
+      <section class="roster" id="admin-list"></section>
+    </section>
+
     <!-- Login console -->
     <section class="panel" id="login-panel">
       <div class="panel-head"><h2>Telegram login</h2>
@@ -148,6 +163,7 @@
 
   </div>
 </div>
+<div id="toast" class="toast hidden"></div>
 {% endblock %}
 
 {% block script %}
@@ -262,6 +278,69 @@ async function saveFields(){
   }
   document.getElementById('tok-hint').textContent = 'Saved — restart bots to apply.';
 }
+
+let _toastTimer = null;
+function toast(msg, kind) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (kind || 'ok');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => t.classList.add('hidden'), 3200);
+}
+async function postForm(url, fields) {
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:new URLSearchParams(fields).toString()});
+  return r.json();
+}
+
+function renderAdmins(d) {
+  const list = document.getElementById('admin-list');
+  list.innerHTML = d.admins.map(id => {
+    const main = id === d.main_admin;
+    return `
+    <div class="roster-row" data-id="${id}">
+      <div class="roster-main">
+        <span class="tag ${main ? 'fa' : 'intl'}">${main ? 'MAIN' : 'ADMIN'}</span>
+        <div class="roster-handle">${id}</div>
+      </div>
+      <div class="roster-actions">
+        ${main ? '' : `<button class="btn small" onclick="makeMain(${id})">Make main</button>
+        <button class="btn small danger" onclick="confirmRemoveAdmin(${id})">Remove</button>`}
+      </div>
+    </div>`;
+  }).join('');
+}
+async function refreshAdmins() {
+  renderAdmins(await fetch('/api/admins').then(r => r.json()));
+}
+function confirmRemoveAdmin(id) {
+  const row = document.querySelector(`#admin-list .roster-row[data-id="${id}"]`);
+  row.innerHTML = `
+    <div class="roster-confirm">
+      <span>Remove admin <span class="roster-handle">${id}</span>?</span>
+      <div class="roster-actions">
+        <button class="btn danger small" onclick="removeAdmin(${id})">Remove</button>
+        <button class="btn small" onclick="refreshAdmins()">Cancel</button>
+      </div>
+    </div>`;
+}
+async function removeAdmin(id) {
+  const d = await postForm('/api/admins/remove', {user_id: id});
+  if (d.ok) { renderAdmins(d); toast(`Removed ${id}`); } else { toast(d.error || 'Could not remove', 'bad'); refreshAdmins(); }
+}
+async function makeMain(id) {
+  const d = await postForm('/api/admins/main', {user_id: id});
+  if (d.ok) { renderAdmins(d); toast(`${id} is now the main admin`); } else toast(d.error || 'Could not change', 'bad');
+}
+document.getElementById('admin-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const box = document.getElementById('admin-err');
+  box.classList.add('hidden');
+  const input = document.getElementById('admin-id');
+  const d = await postForm('/api/admins/add', {user_id: input.value});
+  if (d.ok) { renderAdmins(d); toast(`Added ${input.value.trim()}`); input.value = ''; }
+  else { box.textContent = d.error || 'Could not add that admin'; box.classList.remove('hidden'); }
+});
+refreshAdmins();
 
 refreshLogin();
 setInterval(refreshLogin, 3000);

@@ -32,6 +32,7 @@ import os
 import re
 import json
 import time
+import hashlib
 import asyncio
 import threading
 import logging
@@ -42,6 +43,11 @@ PROJ = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(PROJ, "ai_settings.json")
 STORE_FILE = os.path.join(PROJ, "ai_dedup_store.jsonl")
 STATS_FILE = os.path.join(PROJ, "ai_stats.json")
+# Training data for a future fine-tuned local model: every judged item with Jev's
+# full answer distribution, plus the admin's approve/reject tap as the human label.
+DATASET_DIR = os.path.join(PROJ, "dataset")
+DECISIONS_FILE = os.path.join(DATASET_DIR, "decisions.jsonl")
+LABELS_FILE = os.path.join(DATASET_DIR, "labels.jsonl")
 
 _lock = threading.Lock()
 _settings: dict = {}
@@ -65,6 +71,7 @@ def load_settings() -> dict:
         "max_history": 30,              # cap on dedup candidates sent per request
         "dedup_threshold": 0.72,        # Noul probability above which we call it a dup
         "decide_timeout_seconds": 30,
+        "dataset_max_mb": 500,          # stop collecting (and warn) past this size
         "media_gate": True,
         "media_gate_types": ["photo", "video", "album_photo", "album_video", "file"],
     }
@@ -206,9 +213,15 @@ def _remember(text: str):
 # ── TypeSafe System One call ──────────────────────
 
 _CATEGORIES = {
-    "news": ("Genuine news: politics, government, economy, war or conflict, "
-             "accidents or disasters, major court rulings, science or health "
-             "breakthroughs, weather alerts, or nationally significant sports results."),
+    "news": ("A report of a concrete, current event or development: politics, government "
+             "decisions, economy, war or conflict, accidents or disasters, court rulings, "
+             "science or health, weather alerts, or nationally significant sports results. "
+             "A report ABOUT a religious event, figure or institution (an official statement, "
+             "a pilgrimage and its numbers, a ruling, an attack on a shrine) is news."),
+    "religious": ("Religious, spiritual, mystical or devotional content that does not report a "
+                  "news event: prayers and supplications, Quran verses, hadith, sermons, moral "
+                  "or mystical advice, poetry about God, faith or the Imams, or greetings and "
+                  "condolences for religious occasions."),
     "ad": "Advertising or sponsored content.",
     "self_promo": 'Self-promotion: "follow us", "subscribe", "join our channel".',
     "chatter": "Routine social chatter, polls, or trivia with no real news content.",
@@ -252,7 +265,48 @@ async def _call_typesafe(text: str, source: str, candidates: list[str]) -> dict:
         if p >= threshold and p > dup_prob:
             dup_index, dup_prob = i, p
 
-    return {"category": category, "dup_index": dup_index, "dup_prob": dup_prob}
+    q = response.choices["quality"]
+    return {"category": category, "dup_index": dup_index, "dup_prob": dup_prob,
+            "confidence": q.confidence, "probabilities": dict(q.probabilities),
+            "dup_probs": [response.nouls[f"dup_{i}"].noul for i in range(len(candidates))]}
+
+
+# ── Dataset collection ───────────────────────────
+
+def text_id(text: str) -> str:
+    """Stable id for an item. Candidates in the dedup store are text[:400], so the id is
+    taken over the same prefix — a candidate id then points at the record that judged it."""
+    return hashlib.sha1((text or "")[:400].encode("utf-8")).hexdigest()[:16]
+
+
+_dataset_full_warned = False
+
+
+def _append_dataset(path: str, record: dict):
+    global _dataset_full_warned
+    try:
+        os.makedirs(DATASET_DIR, exist_ok=True)
+        limit = get_settings().get("dataset_max_mb", 500) * 1024 * 1024
+        used = sum(os.path.getsize(f) for f in (DECISIONS_FILE, LABELS_FILE) if os.path.exists(f))
+        if used > limit:
+            if not _dataset_full_warned:
+                log.warning("dataset/ reached %d MB cap — no longer collecting training data", used // 1048576)
+                _dataset_full_warned = True
+            return
+        with open(path, "a") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log.warning("dataset write failed: %s", e)
+
+
+def record_label(item_id, label: str, edited_text=None):
+    """Human outcome from the Telegram approval flow: approved / rejected / approved_edited."""
+    if not item_id:
+        return
+    rec = {"ts": time.time(), "id": item_id, "label": label}
+    if edited_text is not None:
+        rec["edited_text"] = edited_text
+    _append_dataset(LABELS_FILE, rec)
 
 
 # ── Public API ───────────────────────────────────
@@ -309,19 +363,36 @@ async def _decide_async(text: str, source: str = "") -> dict:
         return {"relay": True, "reason": "AI filter disabled", "match": None, "dropped": None}
 
     candidates = [e["text"] for e in _store]
+    item_id = text_id(text)
     try:
         result = await _call_typesafe(text, source, candidates)
     except Exception as e:
         with _lock:
             _stats["errors"] += 1
         log.warning("ai_filter TypeSafe error (fail-open): %s", e)
-        return {"relay": True, "reason": f"TypeSafe error, relayed: {e}", "match": None, "dropped": "error"}
+        return {"relay": True, "reason": f"TypeSafe error, relayed: {e}", "match": None,
+                "dropped": "error", "id": item_id}
+
+    if result["category"] != "news":
+        outcome = "useless"
+    elif result["dup_index"] is not None:
+        outcome = "duplicate"
+    else:
+        outcome = "relay"
+    _append_dataset(DECISIONS_FILE, {
+        "ts": time.time(), "id": item_id, "source": source, "text": text,
+        "model": get_settings().get("model"),
+        "quality": {"choice": result["category"], "confidence": result["confidence"],
+                    "probabilities": result["probabilities"]},
+        "dup": [{"cand": text_id(c), "p": p} for c, p in zip(candidates, result["dup_probs"])],
+        "outcome": outcome,
+    })
 
     if result["category"] != "news":
         with _lock:
             _stats["dropped_useless"] += 1
         log.info("AI DROP (%s): src=%s", result["category"], source)
-        return {"relay": False, "reason": result["category"], "match": None, "dropped": "useless"}
+        return {"relay": False, "reason": result["category"], "match": None, "dropped": "useless", "id": item_id}
 
     if result["dup_index"] is not None:
         with _lock:
@@ -330,7 +401,7 @@ async def _decide_async(text: str, source: str = "") -> dict:
         log.info("AI DROP (duplicate, p=%.2f): src=%s matched=%s",
                  result["dup_prob"], source, matched[:80])
         return {"relay": False, "reason": f"duplicate (p={result['dup_prob']:.2f})",
-                 "match": matched, "dropped": "duplicate"}
+                 "match": matched, "dropped": "duplicate", "id": item_id}
 
     _remember(text)
     with _lock:
@@ -338,7 +409,7 @@ async def _decide_async(text: str, source: str = "") -> dict:
         _last_relayed = time.time()
     _flush_throttled()
     log.info("AI RELAY: src=%s", source)
-    return {"relay": True, "reason": "news", "match": None, "dropped": None}
+    return {"relay": True, "reason": "news", "match": None, "dropped": None, "id": item_id}
 
 
 async def decide(text: str, source: str = "") -> dict:

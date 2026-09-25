@@ -13,8 +13,9 @@ import os
 import time as _time
 from logging.handlers import RotatingFileHandler
 
-from telethon import TelegramClient, events, Button
-from telethon.tl.types import MessageMediaWebPage
+from telethon import TelegramClient, events, Button, utils
+from telethon.tl.types import MessageMediaWebPage, PeerChannel
+from telethon.tl.functions.channels import JoinChannelRequest
 
 from config import (
     API_ID, API_HASH, BOT_TOKEN, ADMIN_IDS, TG_MAIN_ADMIN, TARGET_CHANNEL,
@@ -58,6 +59,7 @@ album_buffer     = {}
 album_timers     = {}
 edit_pending     = {}
 sent_keys        = set()
+join_pending     = {}   # key -> channel handle, for the "join this channel?" Yes/Skip buttons
 
 # Runtime-editable source channels (loaded from config, can be changed via commands
 # or the WebUI). active_channel_ids is the resolved-entity-id mirror of
@@ -76,7 +78,56 @@ STATE_FILE      = "/tmp/feeder_tg_state.json"
 _queue_write_count = 0
 QUEUE_TRIM_EVERY   = 20  # only re-read+trim the queue file every N writes
 
-MAIN_ADMIN_ID   = TG_MAIN_ADMIN
+PROJ_DIR        = os.path.dirname(os.path.abspath(__file__))
+
+
+# ── Admins (hot-reloaded from admins.json, edited from the WebUI) ──
+# config.py's ADMIN_IDS / TG_MAIN_ADMIN only seed this the first time. Command
+# handlers check admin_ids live via func= rather than from_users=, because
+# Telethon resolves from_users= once at first dispatch and never again — an
+# admin added later would be silently ignored, the same trap as chats=.
+
+ADMINS_FILE     = os.path.join(PROJ_DIR, "admins.json")
+admin_ids       = set(ADMIN_IDS) | {TG_MAIN_ADMIN}
+main_admin_id   = TG_MAIN_ADMIN
+_admins_mtime   = -1.0
+
+
+def _maybe_reload_admins():
+    global admin_ids, main_admin_id, _admins_mtime
+    try:
+        mtime = os.path.getmtime(ADMINS_FILE)
+    except OSError:
+        return
+    if mtime == _admins_mtime:
+        return
+    try:
+        with open(ADMINS_FILE) as f:
+            data = json.load(f)
+        ids = {int(x) for x in data.get("admins", [])}
+        main = int(data.get("main_admin") or 0)
+        if ids:
+            admin_ids = ids | ({main} if main else set())
+            main_admin_id = main or next(iter(ids))
+        _admins_mtime = mtime
+        log.info("Admins loaded: %s (main=%s)", sorted(admin_ids), main_admin_id)
+    except Exception as e:
+        log.warning("Could not load %s: %s", ADMINS_FILE, e)
+
+
+def current_admins() -> list:
+    _maybe_reload_admins()
+    return sorted(admin_ids)
+
+
+def _is_admin(event) -> bool:
+    _maybe_reload_admins()
+    return event.sender_id in admin_ids
+
+
+def _is_main_admin(event) -> bool:
+    _maybe_reload_admins()
+    return event.sender_id == main_admin_id
 
 
 # ── Bot state persistence ─────────────────────
@@ -145,21 +196,83 @@ def get_channel_list_text():
 # on_new_message()/on_edited_message() filter manually against
 # active_channel_ids, which this function keeps in sync with active_channels.
 
+CHANNEL_IDS_CACHE_FILE = os.path.join(PROJ_DIR, "channel_ids_cache.json")  # handle -> marked peer id
+
+
+def _load_channel_id_cache() -> dict:
+    try:
+        with open(CHANNEL_IDS_CACHE_FILE) as f:
+            cache = json.load(f)
+    except Exception:
+        return {}
+    # Older entries stored a channel's raw (positive) id; convert to marked.
+    return {h: (utils.get_peer_id(PeerChannel(v)) if v > 0 else v) for h, v in cache.items()}
+
+
+def _save_channel_id_cache(cache: dict):
+    try:
+        tmp = CHANNEL_IDS_CACHE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, CHANNEL_IDS_CACHE_FILE)
+    except Exception as e:
+        log.warning("Could not save channel id cache: %s", e)
+
+
 async def sync_channel_ids():
-    """(Re)resolve active_channels to Telethon entity ids. Never removes an id
-    for a channel that fails to resolve (e.g. transient network hiccup) unless
-    it was actually dropped from active_channels."""
+    """(Re)resolve active_channels to Telethon entity ids, using a persistent
+    cache so a routine restart never needs to re-hit Telegram's
+    ResolveUsernameRequest for a channel it has already resolved before.
+
+    Without this, every restart re-resolves all channels over the network —
+    and enough of those in a short window trips Telegram's flood-wait
+    protection, which then blocks intake for those channels for minutes (seen
+    in production: a config change triggered a restart, which triggered a
+    flood-wait, which meant most channels weren't monitored for a while).
+    Never removes an id for a channel that fails to resolve (e.g. a transient
+    network hiccup) unless it was actually dropped from active_channels.
+
+    Two more things keep this from re-tripping that flood-wait once it clears:
+    firing get_entity() for a dozen channels back-to-back with no spacing looks
+    like abuse to Telegram, so freshly-resolved lookups are spaced out; and if
+    a FloodWaitError actually happens, resolution stops immediately instead of
+    hammering the remaining channels into the same wall (seen in production:
+    retrying into an active flood-wait made the wait longer each time, not
+    shorter — 97s -> 242s -> 392s -> 404s across repeated attempts).
+    """
+    from telethon.errors.rpcerrorlist import FloodWaitError
     global active_channel_ids
+    cache = _load_channel_id_cache()
     resolved = set()
+    from_cache = 0
+    dirty = False
+    first_fresh = True
     for ch in active_channels:
+        cid = cache.get(ch)
+        if cid is not None:
+            resolved.add(cid)
+            from_cache += 1
+            continue
+        if not first_fresh:
+            await asyncio.sleep(1.5)
+        first_fresh = False
         try:
             ent = await userbot.get_entity(ch)
-            resolved.add(ent.id)
+            pid = utils.get_peer_id(ent)  # marked id — matches event.chat_id
+            resolved.add(pid)
+            cache[ch] = pid
+            dirty = True
+        except FloodWaitError as e:
+            log.warning("Flood-wait resolving %s (%ss) — stopping channel "
+                        "resolution for this run rather than hitting it again", ch, e.seconds)
+            break
         except Exception as e:
             log.warning("Could not resolve channel %s: %s", ch, e)
+    if dirty:
+        _save_channel_id_cache(cache)
     active_channel_ids = resolved
-    log.info("Resolved %d/%d source channels to live entity ids",
-              len(resolved), len(active_channels))
+    log.info("Resolved %d/%d source channels to live entity ids (%d from cache, %d freshly resolved)",
+              len(resolved), len(active_channels), from_cache, len(resolved) - from_cache)
 
 async def channels_reload_task(check_every: int = 20):
     """Hot-reload CHANNELS_FILE (written by /addchannel, /removechannel, or the
@@ -175,8 +288,88 @@ async def channels_reload_task(check_every: int = 20):
                 continue
             load_channels()
             await sync_channel_ids()
+            await ensure_channels_joined()
         except Exception as e:
             log.warning("channels_reload_task error: %s", e)
+
+
+# ── Join-request workflow ─────────────────────
+# Resolving a public channel's username is not the same as being a member of
+# it — and Telegram does not reliably push live update notifications for a
+# channel the account hasn't joined, even though history/entity lookups still
+# work. A channel that resolves fine but never produces any news is a likely
+# symptom of exactly this. Per the user's explicit ask: never join silently —
+# ask about each channel individually, and only join the ones approved.
+
+JOIN_SKIPPED_FILE = os.path.join(PROJ_DIR, "join_skipped.json")  # handles the admin said "skip" for
+
+
+def _load_join_skipped() -> set:
+    try:
+        with open(JOIN_SKIPPED_FILE) as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def _save_join_skipped(skipped: set):
+    try:
+        tmp = JOIN_SKIPPED_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(sorted(skipped), f, ensure_ascii=False)
+        os.replace(tmp, JOIN_SKIPPED_FILE)
+    except Exception as e:
+        log.warning("Could not save join-skipped list: %s", e)
+
+
+def join_buttons(key):
+    return [[
+        Button.inline("✅ Join", data=f"joinyes_{key}"),
+        Button.inline("❌ Skip", data=f"joinno_{key}"),
+    ]]
+
+
+async def ensure_channels_joined():
+    """Ask the admin, one channel at a time, before joining any configured
+    source channel the userbot account isn't a member of yet.
+
+    Checks membership with a single get_dialogs() pass rather than one
+    request per channel — after the flood-wait incident with
+    ResolveUsernameRequest, minimizing per-channel network calls here on
+    purpose.
+    """
+    skipped = _load_join_skipped()
+    cache = _load_channel_id_cache()
+    try:
+        joined_ids = {d.id async for d in userbot.iter_dialogs()}
+    except Exception as e:
+        log.warning("Could not list joined dialogs (skipping join-check this round): %s", e)
+        return
+
+    for ch in list(active_channels):
+        if ch in skipped or ch in join_pending.values():
+            continue
+        cid = cache.get(ch)
+        if cid is None or cid in joined_ids:
+            continue  # not resolved yet, or already a member
+        key = ch.lstrip("@")
+        join_pending[key] = ch
+        name = active_names.get(ch, ch)
+        text = (
+            f"📡 **Not joined yet:** `{ch}` ({name})\n\n"
+            f"The account isn't a member of this channel, so live updates may "
+            f"never arrive even though it resolves fine. Join it?"
+        )
+        sent_to_any = False
+        for admin_id in current_admins():
+            try:
+                await bot.send_message(admin_id, text, buttons=join_buttons(key), parse_mode="markdown")
+                sent_to_any = True
+            except Exception as e:
+                log.warning("Could not send join prompt for %s to admin %s: %s", ch, admin_id, e)
+        if sent_to_any:
+            log.info("Asked admin whether to join %s", ch)
+        await asyncio.sleep(1.5)  # one at a time, not a burst of messages
 
 
 # ── Queue writer ──────────────────────────────
@@ -363,6 +556,7 @@ async def process_msgs(msgs, source_username=""):
     # and are judged on that caption's text.
     if ai_filter.is_enabled() and judge_text.strip():
         decision = await ai_filter.decide(judge_text, source_username)
+        entry["judge_id"] = decision.get("id")  # links the admin's approve/reject to the dataset record
         if not decision["relay"]:
             log.info("AI filter dropped %s: %s — %s",
                      decision["dropped"], source_username, decision["reason"])
@@ -412,19 +606,25 @@ async def process_msgs(msgs, source_username=""):
             f"**TG publish:** {pub_status}\n\n"
             f"**Preview:**\n{preview}"
         )
-        try:
-            for admin_id in ADMIN_IDS:
+        sent_to_any = False
+        for admin_id in current_admins():
+            try:
                 await bot.send_message(admin_id, text,
                                        buttons=approval_buttons(key),
                                        parse_mode="markdown")
+                sent_to_any = True
+            except Exception as e:
+                # One admin's send failing (e.g. Telethon has no cached input
+                # entity for an admin who has never messaged this bot token)
+                # must never stop delivery to the others in this loop.
+                log.error("Failed to send approval request to admin %s: %s", admin_id, e)
+        if sent_to_any:
             log.info("Approval requested for message id=%s", msgs[0].id)
-        except Exception as e:
-            log.error("Failed to send approval request: %s", e)
 
 
 # ── Bot commands ──────────────────────────────
 
-@bot.on(events.NewMessage(from_users=ADMIN_IDS, pattern="/start"))
+@bot.on(events.NewMessage(func=_is_admin, pattern="/start"))
 async def cmd_start(event):
     label  = "🤖 Auto" if mode == "auto" else "👤 Manual"
     pub    = "🟢 ON" if tg_publish else "🔴 OFF"
@@ -444,7 +644,7 @@ async def cmd_start(event):
         parse_mode="markdown"
     )
 
-@bot.on(events.NewMessage(from_users=ADMIN_IDS, pattern="/status"))
+@bot.on(events.NewMessage(func=_is_admin, pattern="/status"))
 async def cmd_status(event):
     label  = "🤖 Auto" if mode == "auto" else "👤 Manual"
     pub    = "🟢 ON" if tg_publish else "🔴 OFF"
@@ -455,7 +655,7 @@ async def cmd_status(event):
         parse_mode="markdown"
     )
 
-@bot.on(events.NewMessage(from_users=ADMIN_IDS, pattern="/mode"))
+@bot.on(events.NewMessage(func=_is_admin, pattern="/mode"))
 async def cmd_mode(event):
     current = "🤖 Auto" if mode == "auto" else "👤 Manual"
     await event.respond(
@@ -467,7 +667,7 @@ async def cmd_mode(event):
         parse_mode="markdown"
     )
 
-@bot.on(events.NewMessage(from_users=[MAIN_ADMIN_ID], pattern="/tgon"))
+@bot.on(events.NewMessage(func=_is_main_admin, pattern="/tgon"))
 async def cmd_tgon(event):
     global tg_publish
     tg_publish = True
@@ -475,7 +675,7 @@ async def cmd_tgon(event):
     await event.respond("🟢 **TG channel publish: ON**", parse_mode="markdown")
     log.info("TG publish → ON")
 
-@bot.on(events.NewMessage(from_users=[MAIN_ADMIN_ID], pattern="/tgoff"))
+@bot.on(events.NewMessage(func=_is_main_admin, pattern="/tgoff"))
 async def cmd_tgoff(event):
     global tg_publish
     tg_publish = False
@@ -483,7 +683,7 @@ async def cmd_tgoff(event):
     await event.respond("🔴 **TG channel publish: OFF**\n_(messages still go to Bale)_", parse_mode="markdown")
     log.info("TG publish → OFF")
 
-@bot.on(events.NewMessage(from_users=[MAIN_ADMIN_ID], pattern="/tgstop"))
+@bot.on(events.NewMessage(func=_is_main_admin, pattern="/tgstop"))
 async def cmd_tgstop(event):
     global tg_active
     tg_active = False
@@ -496,7 +696,7 @@ async def cmd_tgstop(event):
     )
     log.info("TG bot → STOPPED")
 
-@bot.on(events.NewMessage(from_users=[MAIN_ADMIN_ID], pattern="/tgstart"))
+@bot.on(events.NewMessage(func=_is_main_admin, pattern="/tgstart"))
 async def cmd_tgstart(event):
     global tg_active
     tg_active = True
@@ -509,11 +709,11 @@ async def cmd_tgstart(event):
     )
     log.info("TG bot → STARTED")
 
-@bot.on(events.NewMessage(from_users=[MAIN_ADMIN_ID], pattern="/channels"))
+@bot.on(events.NewMessage(func=_is_main_admin, pattern="/channels"))
 async def cmd_channels(event):
     await event.respond(get_channel_list_text(), parse_mode="markdown")
 
-@bot.on(events.NewMessage(from_users=[MAIN_ADMIN_ID], pattern=r"/addchannel (.+)"))
+@bot.on(events.NewMessage(func=_is_main_admin, pattern=r"/addchannel (.+)"))
 async def cmd_addchannel(event):
     # Format: /addchannel @username ChannelName [persian]
     parts = event.pattern_match.group(1).strip().split()
@@ -534,7 +734,11 @@ async def cmd_addchannel(event):
     save_channels()
     try:
         ent = await userbot.get_entity(ch)
-        active_channel_ids.add(ent.id)
+        pid = utils.get_peer_id(ent)
+        active_channel_ids.add(pid)
+        cache = _load_channel_id_cache()
+        cache[ch] = pid
+        _save_channel_id_cache(cache)
     except Exception as e:
         log.warning("Could not resolve new channel %s: %s", ch, e)
 
@@ -542,7 +746,7 @@ async def cmd_addchannel(event):
     await event.respond(f"✅ Added: {flag} `{ch}` — {name}", parse_mode="markdown")
     log.info("Added channel: %s (%s)", ch, name)
 
-@bot.on(events.NewMessage(from_users=[MAIN_ADMIN_ID], pattern=r"/removechannel (.+)"))
+@bot.on(events.NewMessage(func=_is_main_admin, pattern=r"/removechannel (.+)"))
 async def cmd_removechannel(event):
     ch = event.pattern_match.group(1).strip()
     if not ch.startswith("@"):
@@ -558,7 +762,7 @@ async def cmd_removechannel(event):
     else:
         await event.respond(f"⚠️ `{ch}` not in list.", parse_mode="markdown")
 
-@bot.on(events.NewMessage(from_users=ADMIN_IDS))
+@bot.on(events.NewMessage(func=_is_admin))
 async def handle_edit_reply(event):
     msg = event.message
     if not msg.reply_to:
@@ -568,6 +772,7 @@ async def handle_edit_reply(event):
         if v.get("edit_msg_id") == replied_id:
             new_text = msg.text.strip()
             v["caption"] = new_text
+            v["edited"] = True
             pending[k] = v
             edit_pending.pop(k)
             await bot.send_message(
@@ -581,7 +786,7 @@ async def handle_edit_reply(event):
 
 @bot.on(events.CallbackQuery())
 async def on_button(event):
-    if event.sender_id not in ADMIN_IDS:
+    if not _is_admin(event):
         return
     global mode
     data = event.data.decode()
@@ -619,6 +824,10 @@ async def on_button(event):
                 await event.edit("⚠️ Already handled.")
                 return
             sent_keys.add(key)
+            if entry.get("edited"):
+                ai_filter.record_label(entry.get("judge_id"), "approved_edited", entry.get("caption"))
+            else:
+                ai_filter.record_label(entry.get("judge_id"), "approved")
             if tg_publish:
                 await event.edit("⏳ Sending...")
                 sent_id = await send_to_channel(entry)
@@ -636,9 +845,36 @@ async def on_button(event):
 
         elif data.startswith("no_"):
             key = data[3:]
-            pending.pop(key, None)
+            entry = pending.pop(key, None)
             edit_pending.pop(key, None)
+            if entry:
+                ai_filter.record_label(entry.get("judge_id"), "rejected")
             await event.edit("❌ Skipped.")
+
+        elif data.startswith("joinyes_"):
+            key = data[8:]
+            ch = join_pending.pop(key, None)
+            if not ch:
+                await event.edit("⚠️ Already handled.")
+                return
+            await event.edit(f"⏳ Joining `{ch}`...", parse_mode="markdown")
+            try:
+                ent = await userbot.get_entity(ch)
+                await userbot(JoinChannelRequest(ent))
+                await event.edit(f"✅ Joined `{ch}`", parse_mode="markdown")
+                log.info("Joined channel %s", ch)
+            except Exception as e:
+                await event.edit(f"⚠️ Failed to join `{ch}`: {e}", parse_mode="markdown")
+                log.warning("Failed to join %s: %s", ch, e)
+
+        elif data.startswith("joinno_"):
+            key = data[7:]
+            ch = join_pending.pop(key, None)
+            if ch:
+                skipped = _load_join_skipped()
+                skipped.add(ch)
+                _save_join_skipped(skipped)
+            await event.edit(f"⏭️ Skipped `{ch or key}`", parse_mode="markdown")
 
     except Exception as e:
         log.error("Button handler error: %s", e)
@@ -719,24 +955,21 @@ async def on_edited_message(event):
 # the event loop, leaving a CLOSE-WAIT socket and no news). Force a reconnect so
 # intake resumes without waiting for Telethon's own (slow/quiet) reconnect.
 
-async def intake_watchdog(stale_after: int = 120, check_every: int = 30):
-    """Restart the bot if Telegram updates stop arriving (intake frozen) while
-    the userbot still thinks it's connected. Only acts on telemetry recorded
-    AFTER this boot — a stale on-disk timestamp from a previous run is ignored."""
+async def intake_watchdog(stale_after: int = 2700, check_every: int = 60):
+    """Restart the bot if no message has arrived from any source channel for a
+    long time while the userbot still thinks it's connected (a wedged
+    connection — seen in production once).
+
+    stale_after is deliberately long: a couple of quiet minutes on news
+    channels is normal (especially overnight), and each restart wipes the
+    in-memory approval queue. With a 120s threshold this killed the bot every
+    time the news went quiet for two minutes. Reads the in-process timestamp
+    that on_new_message() updates, not the stats file (which is only flushed
+    on relays, so it lagged behind real intake)."""
     await asyncio.sleep(20)  # grace period on startup
     while True:
         await asyncio.sleep(check_every)
-        try:
-            d = ai_filter.read_stats_file()
-        except Exception:
-            d = {}
-        last = d.get("last_received", 0) or 0
-        # Ignore telemetry that predates this boot (stale file from a test/old run).
-        if last < _BOT_STARTED_AT:
-            ai_filter.mark_received()
-            continue
-        if _BOT_STARTED_AT and (_time.time() - _BOT_STARTED_AT) < stale_after:
-            continue  # haven't been up long enough to expect a verdict yet
+        last = max(ai_filter._last_received, _BOT_STARTED_AT)
         if (_time.time() - last) >= stale_after and userbot.is_connected():
             log.warning("Intake stale %.0fs — restarting telegram_bot "
                         "(supervisor will respawn a fresh connection)",
@@ -782,6 +1015,7 @@ async def main():
     await sync_channel_ids()
     await bot.start(bot_token=BOT_TOKEN)
     log.info("Telegram bot started. tg_active=%s tg_publish=%s", tg_active, tg_publish)
+    await ensure_channels_joined()  # needs `bot` started to prompt the admin
     await asyncio.gather(
         userbot.run_until_disconnected(),
         bot.run_until_disconnected(),

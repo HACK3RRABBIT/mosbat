@@ -79,7 +79,7 @@ through in-process calls or a message queue library:
 **`ai_filter.py` is a single-request TypeSafe (System One / Jev) gate** invoked
 from `telegram_bot.py` before anything is queued (queuing is shared by both bots,
 so this is the one interposition point). One `system_one()` call asks a `Choice`
-question ("what kind of content is this: news/ad/self_promo/chatter/other") and,
+question ("what kind of content is this: news/religious/ad/self_promo/chatter/other") and,
 batched into the *same* request, one `Noul` question per recently-relayed item
 ("does this report the same event as recent item i?") — TypeSafe runs all
 questions in a request in parallel, so the per-message cost stays roughly flat as

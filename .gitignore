@@ -12,3 +12,9 @@ ai_dedup_store.jsonl
 webui/master_status.json
 webui/master_control.json
 webui/login_state.json
+channel_ids_cache.json
+join_skipped.json
+admins.json
+.judge-downloads/
+.venv-judge/
+dataset/
